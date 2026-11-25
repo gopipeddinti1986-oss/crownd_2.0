@@ -101,4 +101,6 @@ The authentication/security hardening phase is first. Do not implement real paym
 
 ## Current phase
 
-Phase 1 audit and roadmap are complete. Authentication/security implementation begins only after preserving a passing baseline and confirming the existing preview state. Completion will be recorded in `IMPLEMENTATION_STATUS.md` with actual test evidence and remaining limitations.
+- **Audit and roadmap:** complete. The initial branch was clean at `75601c8`; baseline tests/build and the existing preview/API were verified.
+- **Phase 1 authentication/security:** implemented in this branch; additive migration `0002_auth_security`, Argon2id/legacy upgrade, revocable sessions, rotating HttpOnly refresh cookie, email verification/recovery with explicit SMTP/no-send modes, rate limits, origin checks, production configuration validation, in-memory-only access tokens, protected UI and role navigation. See `IMPLEMENTATION_STATUS.md` for current test evidence.
+- **Next:** Phase 2 API schema and comprehensive resource policy hardening; then creator/brand operational breadth. Payment verification and financial releases remain blocked until Phases 2 and 4/5 are complete.

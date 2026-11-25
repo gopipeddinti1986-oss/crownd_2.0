@@ -9,10 +9,17 @@ db=SessionLocal()
 def account(name,email,role,password):
     user=db.scalar(select(User).where(User.email==email))
     if user: return user
+    legacy_email={"brand@crownd.example.com":"brand@crownd.local","creator@crownd.example.com":"creator@crownd.local"}.get(email)
+    if legacy_email:
+        user=db.scalar(select(User).where(User.email==legacy_email))
+        if user:
+            user.email=email
+            db.flush()
+            return user
     user=User(name=name,email=email,role=role,password_hash=hash_password(password));db.add(user);db.flush();return user
 try:
-    brand=account("Noya Botanics","brand@crownd.local","brand","CrownDemo!2026")
-    creator=account("Jules Lane","creator@crownd.local","creator","CrownDemo!2026")
+    brand=account("Noya Botanics","brand@crownd.example.com","brand","CrownDemo!2026")
+    creator=account("Jules Lane","creator@crownd.example.com","creator","CrownDemo!2026")
     db.flush()
     if not db.scalar(select(BrandProfile).where(BrandProfile.user_id==brand.id)): db.add(BrandProfile(user_id=brand.id,name="Noya Botanics",industry="Beauty & Wellness",website="https://example.com"))
     if not db.scalar(select(CreatorProfile).where(CreatorProfile.user_id==creator.id)): db.add(CreatorProfile(user_id=creator.id,username="jules.lane",niche="Beauty & Wellness",location="Mumbai, India",bio="Thoughtful skincare and slow mornings.",platform="Instagram",followers=24800,engagement=4.8,crown_score=742,trust_score=93))
@@ -28,5 +35,5 @@ try:
     if not db.scalar(select(Referral).where(Referral.campaign_id==campaign.id,Referral.creator_id==creator.id)):
         db.add(Referral(campaign_id=campaign.id,creator_id=creator.id,code="JULES14"))
     db.commit()
-    print("Seed ready. Demo only: brand@crownd.local / creator@crownd.local (password: CrownDemo!2026)")
+    print("Seed ready. Demo only: brand@crownd.example.com / creator@crownd.example.com (password: CrownDemo!2026)")
 finally: db.close()

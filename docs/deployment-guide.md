@@ -2,14 +2,18 @@
 
 ## Local containers
 
-`docker compose up --build` uses Postgres 16, FastAPI, migrations and Nginx static SPA. The web container serves on port 8080; API docs on port 8000. Override local defaults before use; do not publish container ports without TLS/network policy.
+`docker compose up --build` starts PostgreSQL 16, FastAPI with reviewed Alembic upgrades, React static hosting/Nginx, and a local Mailpit SMTP sink. The SPA is on `http://localhost:8080`, API docs on `http://localhost:8000/docs`, and local inbox on `http://localhost:8025`. Mailpit is a local sink only; its messages are not sent to external recipients. Configure `JWT_SECRET`, `POSTGRES_PASSWORD`, exact local CORS/frontend origin and trusted proxy settings before sharing beyond a development workstation.
 
-## Hosted deployment outline (not yet completed)
+## Hosted deployment readiness
 
-- Frontend: deploy `frontend` on Vercel or static hosting, set `VITE_API_URL` to the HTTPS versioned API URL (or configure same-origin reverse proxy).
-- API: build `backend/Dockerfile` on a Python container host; configure `DATABASE_URL`, high-entropy `JWT_SECRET`, `APP_ENV=production`, `PAYMENT_MODE` only after real gateway support, and exact production `CORS_ORIGINS`.
-- Database: managed PostgreSQL with SSL, backups, least-privilege application role, reviewed Alembic migration.
-- Storage/email/payments: no production adapter is implemented. Configure these only after their respective integration and verification work.
-- Enable TLS, health checks, structured logs, error/metrics alerts, backups, migration rollback plan, dependency scanning and security review.
+Authentication now has strong password hashing, short-lived server-checked access tokens, HttpOnly rotating refresh cookies, reset/verification tokens, per-client throttling, and fail-closed production setting checks. A hosted app still needs all of the following configuration and operational work:
 
-Never deploy with local simulator, demo users, SQLite on ephemeral disk, default credentials, wildcard CORS, or default JWT secret. This repository is not production ready yet.
+- Frontend: deploy `frontend` on Vercel/static hosting; configure `VITE_API_URL` to the HTTPS versioned API URL or a same-origin reverse proxy.
+- API: build `backend/Dockerfile`; set `APP_ENV=production`, a unique strong `JWT_SECRET`, `DATABASE_URL`, `ACCESS_TOKEN_MINUTES`, `REFRESH_TOKEN_DAYS`, `COOKIE_SECURE=true`, optional `COOKIE_DOMAIN`, `COOKIE_SAMESITE=none` only if the API is on a different site (otherwise keep `lax`), exact `FRONTEND_BASE_URL`, `CORS_ORIGINS`, and `TRUSTED_PROXY_IPS` to real immediate proxy addresses. Never trust a user-supplied forwarded header.
+- Database: managed PostgreSQL with TLS, least-privilege role, backups/restore tests; deploy with `alembic upgrade head`. `main.py` no longer auto-creates schema.
+- Rate limits: use managed Redis via `RATE_LIMIT_STORAGE_URI`, configure availability/monitoring, and test multi-instance behavior. Production refuses in-memory limit storage.
+- Email: set `EMAIL_MODE=smtp`, SMTP host/port, credentials where needed, `SMTP_STARTTLS=true`, and `EMAIL_FROM`. Confirm actual delivery, bounce handling and link origin; no provider account is included.
+- Enable TLS, CSP, observability, error/metrics alerts, migration/rollback runbook, dependency scanning and security review. Auth logs avoid secrets/PII but still require retention controls.
+- Payments/storage: no live payment, object storage or production email vendor adapter beyond configurable SMTP is provisioned. Do not enable a live release until payment signatures/webhooks/refunds, financial ledger controls and payouts are implemented and audited.
+
+Never deploy with demo seed, local simulator, SQLite on ephemeral disk, default credentials, wildcard CORS, development email, or default JWT secret. Current repo is not yet production-ready.

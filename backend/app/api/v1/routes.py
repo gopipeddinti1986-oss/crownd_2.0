@@ -7,11 +7,13 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select, func
 from app.database import get_db
 from app.models.entities import *
-from app.security import current_user, require_role, hash_password, verify_password, create_token
+from app.security import current_user, require_role
 from app.core.config import settings
 from app.services.rewards import calculate_reward
+from app.api.v1.auth import router as auth_router
 
 router = APIRouter()
+router.include_router(auth_router)
 def slugify(s): return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-") + "-" + secrets.token_hex(3)
 def money(n): return Decimal(str(n)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 def audit(db, actor, action, kind, entity):
@@ -19,34 +21,6 @@ def audit(db, actor, action, kind, entity):
 
 @router.get("/health")
 def health(): return {"status":"ok", "service":"crownd-api"}
-
-@router.post("/auth/register", status_code=201)
-def register(body: dict, db: Session = Depends(get_db)):
-    name, email, password, role = (body.get(k) for k in ("name","email","password","role"))
-    if not name or not email or not password or role not in ("creator","brand","customer"): raise HTTPException(422, "Name, email, password and a supported role are required")
-    if len(password)<10: raise HTTPException(422, "Password must contain at least 10 characters")
-    email=email.lower().strip()
-    if db.scalar(select(User).where(User.email==email)): raise HTTPException(409,"An account with this email already exists")
-    user=User(name=name.strip(), email=email, password_hash=hash_password(password), role=role)
-    db.add(user); db.flush()
-    if role=="creator":
-        username=re.sub(r"[^a-z0-9_]", "", (body.get("username") or name.lower().replace(" ","_")))[:55] or f"creator{user.id}"
-        if db.scalar(select(CreatorProfile).where(CreatorProfile.username==username)): username += str(user.id)
-        db.add(CreatorProfile(user_id=user.id, username=username, niche=body.get("niche","Lifestyle"), platform=body.get("platform","Instagram")))
-    if role=="brand": db.add(BrandProfile(user_id=user.id, name=body.get("brand_name") or name, industry=body.get("industry","Consumer"), website=body.get("website","")))
-    audit(db,user,"account.registered","user",user.id); db.commit(); db.refresh(user)
-    return {"access_token":create_token(user),"token_type":"bearer","user":{"id":user.id,"name":user.name,"email":user.email,"role":user.role}}
-
-@router.post("/auth/login")
-def login(body: dict, db: Session=Depends(get_db)):
-    user=db.scalar(select(User).where(User.email==str(body.get("email"," ")).lower().strip()))
-    if not user or not verify_password(str(body.get("password","")),user.password_hash): raise HTTPException(401,"Email or password is incorrect")
-    if not user.is_active: raise HTTPException(403,"Account is disabled")
-    return {"access_token":create_token(user),"token_type":"bearer","user":{"id":user.id,"name":user.name,"email":user.email,"role":user.role}}
-@router.get("/auth/me")
-def me(user: User=Depends(current_user), db: Session=Depends(get_db)):
-    profile=db.scalar(select(CreatorProfile).where(CreatorProfile.user_id==user.id)) if user.role=="creator" else db.scalar(select(BrandProfile).where(BrandProfile.user_id==user.id)) if user.role=="brand" else None
-    return {"id":user.id,"name":user.name,"email":user.email,"role":user.role,"profile":profile.__dict__ if profile else None}
 
 @router.get("/creators")
 def creators(q:str|None=None,niche:str|None=None,platform:str|None=None,limit:int=Query(30,ge=1,le=100),offset:int=0,db:Session=Depends(get_db),user:User=Depends(current_user)):
