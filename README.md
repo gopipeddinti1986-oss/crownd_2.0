@@ -61,7 +61,7 @@ API workflows: register / log in as a brand and creator; create a brand product 
 ## Architecture and docs
 
 - [Architecture](docs/architecture.md) · [Database schema](docs/database-schema.md) · [API reference](docs/api-documentation.md)
-- [Development roadmap/status](docs/development-roadmap.md) · [Testing](docs/testing-guide.md) · [Deployment](docs/deployment-guide.md) · [Security](docs/security-guide.md)
+- [Verified phased roadmap](docs/DEVELOPMENT_ROADMAP.md) · [Prior roadmap](docs/development-roadmap.md) · [Testing](docs/testing-guide.md) · [Deployment](docs/deployment-guide.md) · [Security](docs/security-guide.md)
 - [Authentication](docs/authentication.md) · [Attribution](docs/referral-attribution.md) · [Reward rules](docs/reward-calculation.md)
 
 ## Important limitations

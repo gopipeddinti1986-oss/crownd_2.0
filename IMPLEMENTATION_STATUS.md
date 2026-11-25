@@ -1,6 +1,12 @@
 # CROWND implementation status
 
-Updated: 2026-11-25. This status is deliberately conservative; only checked items have working code and verification evidence.
+Updated: 2026-11-25. This status is deliberately conservative; only checked items have working code and verification evidence. The source-verified audit and phased task plan are in [docs/DEVELOPMENT_ROADMAP.md](docs/DEVELOPMENT_ROADMAP.md).
+
+## Verified audit baseline
+
+- Current branch began with a clean worktree at `75601c8`; existing web preview and API were running and returned HTTP 200 for UI, API health and campaigns.
+- Baseline: backend pytest **4 passed**; frontend lint clean, Vitest **3 passed**, TypeScript/Vite production build passed (with existing >500 kB JS chunk warning).
+- Source inspection found auth weaknesses: localStorage bearer JWT with no session/revocation, immediate auto-login before email verification, custom PBKDF2, no auth rate limit or reset/verification, generic dict write payloads, and weak default JWT secret. See roadmap for additional confirmed ownership/product/migration risks.
 
 ## Completed in this branch
 
