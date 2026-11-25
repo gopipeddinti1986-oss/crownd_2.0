@@ -1,0 +1,5 @@
+# Security guide
+
+Current controls: parameterized ORM queries; Pydantic settings; password hashes with per-password random salt and PBKDF2-HMAC-SHA256; signed expiring access tokens; server-side role and ownership checks; unique constraints for email/code/application pair/order reward; CORS allowlist setting; input checks in core flows; payment simulator guard for development; admin audit records for selected events.
+
+Important gaps before production: localStorage access tokens, JWT development fallback, no refresh rotation/revocation, MFA, email/account recovery, rate limiting, login lockout, CSRF/CSP/security headers, upload validation/storage, comprehensive Pydantic request schemas, payment webhook signatures, secure session attribution, idempotency, privacy retention/deletion and complete admin audit coverage. Establish a strong secret and HTTPS, use a narrow CORS allowlist, keep demo seed off production, scan dependency advisories, test access boundaries, and obtain independent security review. No credentials should be committed.

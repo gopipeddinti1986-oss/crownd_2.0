@@ -1,0 +1,5 @@
+# Referral attribution
+
+An accepted creator application creates one campaign/creator referral with a random code. Codes are case-insensitive on validation and can be disabled through the model, but self-service revoke/rotate controls are not yet exposed. Referral click requests increment click counts and append timestamped click rows; raw IP/user-agent are not persisted. The endpoint responds with campaign/product destination metadata rather than implementing a full redirecting storefront.
+
+Checkout validates that a code exists and is active, the campaign is published, and its product is either the checked product or unspecified. The order records a referral foreign key. Product must be active and in stock. Codes represent last-click attribution only when a customer explicitly supplies the code; there is no persistent browser session cookie or automatic last-referral lookup yet. The planned attribution window is configured as seven days and shown in the UI, but expiry enforcement is not yet present. Do not treat click count as a unique click metric.

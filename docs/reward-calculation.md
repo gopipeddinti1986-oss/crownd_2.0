@@ -1,0 +1,5 @@
+# Reward calculation
+
+`calculate_reward(order_amount, reward_model, rate)` uses Decimal and rounds to two decimal places with `ROUND_HALF_UP`. Percentage: eligible order amount × rate / 100. Fixed: fixed amount per attributed order. Current small checkout bases the reward on the stored product total (price × quantity), not an itemized net eligible amount; discounts, taxes, shipping, product/campaign caps beyond campaign remaining budget, returns and partial refunds are not modeled.
+
+A locally simulated paid attributed order creates a `pending` reward with a 30-day eligibility timestamp and a ledger entry. This is a record, not a complete ledger settlement system: no scheduled unlock task, refund reversal, admin approval or actual payout rail exists. A payout request sums currently `eligible` records (none become eligible automatically today) and checks the configured minimum. Never use this implementation to promise or settle real money until transaction locking, immutable double-entry postings, idempotency, reconciliation, refund/chargeback and payout controls have been completed and audited.
