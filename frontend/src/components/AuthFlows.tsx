@@ -6,7 +6,7 @@ import {authErrorMessage,confirmPasswordReset,confirmVerification,login,register
 type AuthMode='login'|'register'|'forgot'|'verify';
 export function AuthModal({onClose,onAuth}:{onClose:()=>void;onAuth:(user:User)=>void}){
   const [mode,setMode]=useState<AuthMode>('login');
-  const [role,setRole]=useState<'creator'|'brand'>('creator');
+  const [role,setRole]=useState<'creator'|'brand'|'customer'>('creator');
   const [name,setName]=useState('');
   const [email,setEmail]=useState('');
   const [password,setPassword]=useState('');
@@ -39,7 +39,7 @@ export function AuthModal({onClose,onAuth}:{onClose:()=>void;onAuth:(user:User)=
     {(mode==='login'||mode==='register')&&<div className="auth-tabs"><button className={mode==='login'?'selected':''} onClick={()=>{setMode('login');setNotice('');setError('');}}>Log in</button><button className={mode==='register'?'selected':''} onClick={()=>{setMode('register');setNotice('');setError('');}}>Create account</button></div>}
     {notice&&<div className="auth-notice" role="status"><span>{emailDeliveryEnabled?<Check size={15}/>:<span aria-hidden="true">!</span>}</span><p>{notice}</p></div>}
     <form onSubmit={submit}>
-      {mode==='register'&&<><label>Full name<input required minLength={2} maxLength={120} value={name} onChange={event=>setName(event.target.value)} placeholder="Your name" autoComplete="name"/></label><label>I’m here as<select value={role} onChange={event=>setRole(event.target.value as 'creator'|'brand')}><option value="creator">A creator</option><option value="brand">A brand</option></select></label></>}
+      {mode==='register'&&<><label>Full name<input required minLength={2} maxLength={120} value={name} onChange={event=>setName(event.target.value)} placeholder="Your name" autoComplete="name"/></label><label>I’m here as<select value={role} onChange={event=>setRole(event.target.value as 'creator'|'brand'|'customer')}><option value="creator">A creator</option><option value="brand">A brand</option><option value="customer">A customer</option></select></label></>}
       <label>Email address<input required type="email" maxLength={254} value={email} onChange={event=>setEmail(event.target.value)} placeholder="you@example.com" autoComplete="email"/></label>
       {mode==='login'||mode==='register'?<label>Password<input required minLength={mode==='register'?12:1} maxLength={128} type="password" value={password} onChange={event=>setPassword(event.target.value)} placeholder={mode==='register'?'At least 12 characters':'Your password'} autoComplete={mode==='register'?'new-password':'current-password'}/></label>:null}
       {error&&<div className="form-error" role="alert">{error}</div>}

@@ -2,7 +2,7 @@ from datetime import datetime, timezone, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from uuid import uuid4
 import re, secrets, hashlib
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func
 from app.database import get_db
@@ -11,9 +11,12 @@ from app.security import current_user, require_role
 from app.core.config import settings
 from app.services.rewards import calculate_reward
 from app.api.v1.auth import router as auth_router
+from app.api.v1.commerce import router as commerce_router, set_referral_cookie
+from app.schemas.commerce import ProductCreate
 
 router = APIRouter()
 router.include_router(auth_router)
+router.include_router(commerce_router)
 def slugify(s): return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-") + "-" + secrets.token_hex(3)
 def money(n): return Decimal(str(n)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 def audit(db, actor, action, kind, entity):
@@ -95,16 +98,11 @@ def review_application(application_id:int,body:dict,db:Session=Depends(get_db),u
         db.add(Referral(campaign_id=c.id,creator_id=a.creator_id,code=code))
     audit(db,user,f"application.{status}","application",a.id); db.commit(); return {"id":a.id,"status":status}
 
-@router.get("/products")
-def products(q:str|None=None,category:str|None=None,limit:int=30,db:Session=Depends(get_db)):
-    stmt=select(Product).where(Product.status=="active")
-    if q: stmt=stmt.where((Product.name.ilike(f"%{q}%"))|(Product.description.ilike(f"%{q}%")))
-    if category: stmt=stmt.where(Product.category.ilike(category))
-    return [{"id":p.id,"name":p.name,"slug":p.slug,"description":p.description,"category":p.category,"price":float(p.price),"stock":p.stock,"image_url":p.image_url,"brand_id":p.brand_id} for p in db.scalars(stmt.limit(min(limit,100))).all()]
 @router.post("/products",status_code=201)
-def create_product(body:dict,db:Session=Depends(get_db),user:User=Depends(require_role("brand"))):
-    if not body.get("name") or Decimal(str(body.get("price",0)))<0: raise HTTPException(422,"Valid product name and non-negative price required")
-    p=Product(brand_id=user.id,name=body["name"],slug=slugify(body["name"]),description=body.get("description",""),category=body.get("category","Other"),price=money(body["price"]),stock=max(0,int(body.get("stock",0))),image_url=body.get("image_url",""))
+def create_product(body:ProductCreate,db:Session=Depends(get_db),user:User=Depends(require_role("brand"))):
+    if body.sale_price is not None and body.sale_price >= body.price:
+        raise HTTPException(422,"Sale price must be below regular price")
+    p=Product(brand_id=user.id,name=body.name,slug=slugify(body.name),description=body.description,category=body.category,price=money(body.price),sale_price=money(body.sale_price) if body.sale_price is not None else None,stock=body.stock,image_url=body.image_url,image_urls=body.image_urls,specifications=body.specifications)
     db.add(p); db.commit(); db.refresh(p); return {"id":p.id,"slug":p.slug}
 
 @router.get("/referrals/me")
@@ -112,15 +110,17 @@ def my_referrals(db:Session=Depends(get_db),user:User=Depends(require_role("crea
     rows=db.execute(select(Referral,Campaign).join(Campaign,Campaign.id==Referral.campaign_id).where(Referral.creator_id==user.id)).all()
     return [{"id":r.id,"campaign_id":c.id,"campaign":c.title,"code":r.code,"clicks":r.clicks,"active":r.active,"url":f"/r/{r.code}"} for r,c in rows]
 @router.get("/r/{code}")
-def track_referral(code:str,db:Session=Depends(get_db)):
+def track_referral(code:str,response:Response,db:Session=Depends(get_db)):
     ref=db.scalar(select(Referral).where(Referral.code==code.upper(),Referral.active==True))
     if not ref: raise HTTPException(404,"Referral code not found")
     c=db.get(Campaign,ref.campaign_id)
-    if c.status!="published": raise HTTPException(410,"Campaign is no longer active")
+    creator=db.get(User,ref.creator_id)
+    if c.status!="published" or not creator or not creator.is_active or not creator.email_verified: raise HTTPException(410,"Referral is no longer active")
     ref.clicks+=1
     db.add(Click(referral_id=ref.id)); db.commit()
+    set_referral_cookie(response,ref)
     p=db.get(Product,c.product_id) if c.product_id else None
-    return {"ok":True,"campaign_id":c.id,"product_id":p.id if p else None,"destination":f"/shop/products/{p.slug}" if p else "/shop","attribution_window_days":settings.attribution_days}
+    return {"ok":True,"campaign_id":c.id,"product_id":p.id if p else None,"destination":f"/products/{p.id}" if p else "/shop","attribution_window_days":settings.attribution_days}
 
 @router.post("/orders",status_code=201)
 def create_order(body:dict,db:Session=Depends(get_db)):

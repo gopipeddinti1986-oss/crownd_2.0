@@ -1,6 +1,6 @@
 # CROWND implementation status
 
-Updated: 2026-11-25, after source audit and Phase 1 authentication/security work. This checklist is conservative: checked items are implemented and the indicated tests passed; not checked means incomplete or unverified. Detailed task/dependency plan: [`docs/DEVELOPMENT_ROADMAP.md`](docs/DEVELOPMENT_ROADMAP.md).
+Updated: 2026-11-25, after Phase 2 customer-commerce implementation and verification. This checklist is conservative: checked items are implemented and the indicated tests passed; not checked means incomplete or unverified. Detailed task/dependency plan: [`docs/DEVELOPMENT_ROADMAP.md`](docs/DEVELOPMENT_ROADMAP.md).
 
 ## Verified audit baseline
 
@@ -34,21 +34,34 @@ Updated: 2026-11-25, after source audit and Phase 1 authentication/security work
 - [x] Production configuration rejects weak/default secret, insecure cookies, wildcard/non-HTTPS/mismatched origins, memory-only/disabled rate limiting, disabled SMTP, non-TLS SMTP and SQLite.
 - [x] Additive migration `0002_auth_security`; app no longer executes `Base.metadata.create_all()` on import. Old existing accounts receive compatibility `email_verified=true` during migration; new signups explicitly false.
 
+### Phase 2 — Customer commerce
+
+- [x] API-backed public product discovery with full-text-like name/description/category/brand search, category and brand filters, effective-price range, stock filter, sort and page controls; active brand, stock and availability shown.
+- [x] Product detail includes regular/sale pricing, images/gallery, specifications, brand, stock, creator program, referral context and related products. Product-create validation supports sale price, gallery and specs.
+- [x] Authenticated server-persisted carts support add/set quantity/remove/clear. Cart/order prices are always recomputed from database Decimal values; client amounts are rejected by the checkout schema.
+- [x] Authenticated multi-line checkout validates a shipping address and cart state, uses a required idempotency key, snapshots item/brand/price/address data, writes order and items together, and conditionally decrements inventory inside one transaction.
+- [x] Customer order history/details expose only owned records (404 for cross-user access); brand/creator/admin business order views remain available. Valid unpaid pending/confirmed cancellation restores stock once; invalid transitions, repeated cancellation, and fulfillment before trusted paid status are rejected.
+- [x] Existing referral-code route sets a signed HttpOnly referral-window cookie. Checkout rechecks active creator/campaign/product eligibility and stores the existing `referral_id`; caller-supplied referral IDs/codes are not accepted by the new checkout.
+- [x] `/shop`, product details, `/cart`, `/checkout`, `/orders`, and order detail pages use the real API and existing CROWND styling; frontend component tests cover discovery, filters including in-stock, empty/error states, product detail/add, cart update/remove, checkout and order history/detail.
+- [x] Additive migration `0003_customer_commerce` adds optional discount/gallery/specification fields, cart/cart-item tables, order-item snapshots, customer/idempotency/address metadata; rollback and fresh/existing SQLite paths passed.
+
 ## In progress / partial
 
 - [ ] Auth is significantly safer but not independently security-audited. Rate limit is IP-based; no MFA, persistent login-failure scoring, account lockout, device/session listing, signed email provider callbacks, or session-management UI.
 - [ ] SMTP adapter is implemented but no external provider credentials/delivery reputation are configured. Actual external receipt was not tested. Compose Mailpit is local-only.
 - [ ] Cookie origin forwarding requires exact production `CORS_ORIGINS`, `FRONTEND_BASE_URL`, and trusted reverse-proxy configuration; only test-client and local proxy behavior were tested.
 - [ ] Frontend navigation now gates roles, but the application remains a large `App.tsx`; numerous feature controls still have incomplete functionality.
-- [ ] Existing campaign/application/referral/order flows remain partial; older business routes use generic dictionaries and need typed schemas and broader cross-resource ownership tests (Phase 2).
-- [ ] Orders are single-product guest requests with manual code attribution. Payment simulator is not a verified provider and must never run in production.
+- [ ] Existing campaign/application/referral and legacy business writes remain partial; older routes use generic dictionaries and need typed schemas and broader cross-resource ownership tests (API-boundary hardening phase).
+- [ ] Legacy public `POST /orders` remains a single-product compatibility endpoint. New `/checkout` requires a signed-in account; guest carts and cart merge are intentionally unsupported.
+- [ ] Checkout creates pending orders, reserves inventory, and reports zero/free shipping. No payment provider, verified payment events, payment-failure cleanup, coupon, tax/shipping quote, address book, or pending-order expiry exists. Do not treat pending orders as paid or fulfill them.
+- [ ] SQLite stock contention tests cover stale-cart oversell prevention and atomic conditional updates; a multi-process/PostgreSQL concurrency/load stress test has not been run.
 - [ ] Rewards start pending; automatic eligibility, refund reversal, admin approval, balanced ledger and payout settlement are absent.
 - [ ] Dashboards have basic aggregate queries; full filters, role customer workflows and transactional analytics are absent. Sample discovery fallback demo campaign cards remain labeled `DEMO`.
 
 ## Not started
 
 - [ ] Complete API Pydantic schemas, centralized policy layer and full cross-brand/creator/customer privacy/ownership audit.
-- [ ] Persistent multi-item cart, customer addresses, shipping/tax, inventory reservations and complete fulfillment.
+- [ ] Payment provider integration/signature webhooks, order payment-failure/refund workflows, saved address book, shipping/tax quoting, automatic expiry of unpaid inventory reservations and complete fulfillment operations.
 - [ ] Razorpay test adapter, signature verification, signed idempotent webhooks, refunds/chargebacks.
 - [ ] Reward lifecycle worker and immutable balanced ledger, payout admin approval/reconciliation.
 - [ ] Complete creator/brand profiles, social evidence, portfolio uploads, brand verification, invitations/collaboration/deliverables.
@@ -65,6 +78,14 @@ Updated: 2026-11-25, after source audit and Phase 1 authentication/security work
 - Frontend `npm run lint`: passed with no warnings. `npm test`: **12 passed**. `npx tsc -b` and `npm run build`: passed.
 - `npm audit --audit-level=moderate`: **0 vulnerabilities**. `git diff --check` passed; secret-pattern scan found no credentials (only placeholder keys in `.env.example`).
 - Build warning remains: main JS chunk ~709 kB uncompressed (>500 kB advisory). Frontend auth tests use mocked Axios adapters; no browser E2E test yet. Compose could not be validated because Docker is not installed.
+
+### Phase 2 verification
+
+- Backend `.venv/bin/pytest -q`: **27 passed**, 1 existing Starlette/httpx deprecation warning. New commerce tests cover product search/brand/category/price/availability/pagination/detail, sale-price/stock validation, persistent cart ownership/quantity/price fields, checkout total recomputation/idempotency/order lines/address, stale stock/oversell protection, cancellation restoration/replay, order history/detail cross-user denial, lifecycle transitions, legacy business-list response compatibility and signed referral cookie tamper/attribution.
+- Migration `0003_customer_commerce`: fresh SQLite upgrade, existing pre-commerce `0002` SQLite schema upgrade and upgrade/downgrade/re-upgrade cycle passed. Current local Alembic head is `0003_customer_commerce`. PostgreSQL migration/rollback was not tested.
+- Live preview smoke: `/shop`, proxied product catalog/categories and a product-detail request returned HTTP 200 from the seeded local catalog. No live checkout was placed against the shared demo DB.
+- Frontend `npm run lint`: clean. Vitest: **21 passed** including 7 commerce component/UI tests plus a customer-role registration/verification test. Coverage includes product discovery, empty/error states, product detail/add, cart update/remove, checkout, orders/cancellation and paise-accurate prices. TypeScript check and Vite production build passed. `npm audit --audit-level=moderate`: **0 vulnerabilities**.
+- Production bundle is ~743 kB uncompressed (>500 kB advisory). No browser-based E2E journey or actual multi-process concurrency stress test was run.
 
 ## Remaining known risks / required configuration
 

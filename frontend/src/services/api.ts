@@ -6,6 +6,9 @@ let refreshInFlight:Promise<AuthPayload|null>|null=null;
 type AuthPayload={access_token:string;token_type:'bearer';expires_in:number;user:User};
 type RetryConfig=InternalAxiosRequestConfig&{_crowndRetried?:boolean};
 export type User={id:number;name:string;email:string;role:'creator'|'brand'|'customer'|'admin'};
+export type CommerceProduct={id:number;name:string;slug:string;description:string;category:string;price:string;sale_price:string|null;effective_price:string;discount_percent:number;stock:number;available:boolean;status:string;image_url:string;image_urls:string[];specifications:Record<string,string>;brand:{id:number;name:string;website:string}|null;creator_program?:{campaign:string;reward_model:string;reward_rate:string;active_creators:number}|null;attribution?:{creator_name:string;campaign:string;code:string;attribution_days:number}|null;related_products?:CommerceProduct[]};
+export type CartData={items:Array<{id:number;product:CommerceProduct;quantity:number;unit_price:string;line_total:string;available:boolean}>;item_count:number;subtotal:string;shipping:string;total:string;currency:string;unavailable_count:number;attribution:{creator_name:string;campaign:string;code:string;attribution_days:number}|null};
+export type CommerceOrder={id:string;order_id:string;amount:string;currency:string;payment_status:string;status:string;created_at:string;updated_at:string;items:Array<{id?:number;product_id:number|null;name:string;brand:string;image_url:string;unit_price:string;quantity:number;line_total:string}>;referral:{creator_name:string;campaign:string;code:string;attribution_days:number}|null;customer?:{name:string;email:string};shipping_address?:{name:string;phone:string;line1:string;line2:string|null;city:string;state:string;postal_code:string;country:string}|null};
 
 // Refresh cookies are HttpOnly and browser-managed. Access tokens live only in this JS module.
 export const authApi=axios.create({baseURL,withCredentials:true,headers:{'Content-Type':'application/json'}});
@@ -70,6 +73,18 @@ export async function logout(){
 export function clearAccessToken(){accessToken=null;}
 export function getAccessToken(){return accessToken;}
 export function setAccessToken(token:string|null){accessToken=token;}
+export async function discoverProducts(params:Record<string,unknown>={}){const {data}=await api.get('/products',{params});return data as {items:CommerceProduct[];total:number;page:number;page_size:number;pages:number};}
+export async function getProduct(id:number){const {data}=await api.get(`/products/${id}`);return data as CommerceProduct;}
+export async function getCart(){const {data}=await api.get('/cart');return data as CartData;}
+export async function addCartItem(product_id:number,quantity=1){const {data}=await api.post('/cart/items',{product_id,quantity});return data as CartData;}
+export async function updateCartItem(itemId:number,quantity:number){const {data}=await api.patch(`/cart/items/${itemId}`,{quantity});return data as CartData;}
+export async function removeCartItem(itemId:number){await api.delete(`/cart/items/${itemId}`);}
+export async function clearCart(){await api.delete('/cart');}
+export async function checkoutOrder(shipping_address:Record<string,string>,idempotencyKey:string){const {data}=await api.post('/checkout',{shipping_address},{headers:{'Idempotency-Key':idempotencyKey}});return data as CommerceOrder;}
+export async function getOrders(page=1){const {data}=await api.get('/orders',{params:{page,page_size:20,view:'customer'}});return data as {items:CommerceOrder[];total:number;page:number;pages:number};}
+export async function getOrder(orderId:string){const {data}=await api.get(`/orders/${encodeURIComponent(orderId)}`);return data as CommerceOrder;}
+export async function cancelOrder(orderId:string){const {data}=await api.post(`/orders/${encodeURIComponent(orderId)}/cancel`);return data as CommerceOrder;}
+export async function trackReferral(code:string){const {data}=await api.get(`/r/${encodeURIComponent(code)}`);return data as {ok:boolean;destination:string;product_id:number|null;attribution_window_days:number};}
 export function authErrorMessage(error:unknown,fallback:string){
   const err=error as AxiosError<{detail?:string|{message?:string}}>|undefined;
   const detail=err?.response?.data?.detail;

@@ -13,7 +13,7 @@ app=FastAPI(title=settings.app_name,version="1.1.0",description="CROWND creator 
 app.state.limiter=limiter
 app.add_exception_handler(RateLimitExceeded,_rate_limit_exceeded_handler)
 origins=[origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()]
-app.add_middleware(CORSMiddleware,allow_origins=origins,allow_credentials=True,allow_methods=["GET","POST","PUT","PATCH","DELETE","OPTIONS"],allow_headers=["Authorization","Content-Type","X-Request-ID"])
+app.add_middleware(CORSMiddleware,allow_origins=origins,allow_credentials=True,allow_methods=["GET","POST","PUT","PATCH","DELETE","OPTIONS"],allow_headers=["Authorization","Content-Type","X-Request-ID","Idempotency-Key"])
 
 @app.middleware("http")
 async def secure_response_headers(request: Request,call_next):

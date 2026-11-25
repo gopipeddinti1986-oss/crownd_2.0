@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from decimal import Decimal
-from sqlalchemy import String, Integer, Boolean, DateTime, ForeignKey, Numeric, Text, UniqueConstraint, Index
+from sqlalchemy import String, Integer, Boolean, DateTime, ForeignKey, Numeric, Text, UniqueConstraint, Index, JSON, CheckConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
@@ -74,7 +74,11 @@ class Product(Base):
     stock: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(20), default="active")
     image_url: Mapped[str] = mapped_column(String(500), default="")
+    image_urls: Mapped[list] = mapped_column(JSON, default=list)
+    specifications: Mapped[dict] = mapped_column(JSON, default=dict)
+    sale_price: Mapped[Decimal | None] = mapped_column(Numeric(12,2), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    __table_args__ = (CheckConstraint("sale_price IS NULL OR (sale_price > 0 AND sale_price < price)", name="ck_product_sale_below_regular"),)
 
 class Campaign(Base):
     __tablename__ = "campaigns"
@@ -133,7 +137,48 @@ class Order(Base):
     referral_id: Mapped[int | None] = mapped_column(ForeignKey("referrals.id"), nullable=True, index=True)
     payment_status: Mapped[str] = mapped_column(String(24), default="pending")
     status: Mapped[str] = mapped_column(String(24), default="payment_pending")
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    shipping_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    shipping_phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    shipping_line1: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    shipping_line2: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    shipping_city: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    shipping_state: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    shipping_postal_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    shipping_country: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    __table_args__ = (UniqueConstraint("customer_id", "idempotency_key", name="uq_order_customer_idempotency"),)
+
+class Cart(Base):
+    __tablename__ = "carts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+class CartItem(Base):
+    __tablename__ = "cart_items"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cart_id: Mapped[int] = mapped_column(ForeignKey("carts.id", ondelete="CASCADE"), index=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), index=True)
+    quantity: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+    __table_args__ = (UniqueConstraint("cart_id", "product_id", name="uq_cart_product"),)
+
+class OrderItem(Base):
+    __tablename__ = "order_items"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), index=True)
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id", ondelete="SET NULL"), nullable=True, index=True)
+    product_name: Mapped[str] = mapped_column(String(160))
+    brand_name: Mapped[str] = mapped_column(String(120))
+    image_url: Mapped[str] = mapped_column(String(500), default="")
+    unit_price: Mapped[Decimal] = mapped_column(Numeric(12,2))
+    quantity: Mapped[int] = mapped_column(Integer)
+    line_total: Mapped[Decimal] = mapped_column(Numeric(12,2))
 
 class Reward(Base):
     __tablename__ = "rewards"
