@@ -32,7 +32,7 @@ The repository is not a legacy multi-module app: its initial commit was a README
 
 ### Phase sequence
 
-Authentication/security and customer commerce are in place. Phase 3 implements only backend-simulated DEMO and offline COD collection controls; the explicit product decision is no gateway or online-money integration in this milestone. A future genuine payment provider requires separate approval, reviewed lifecycle design, and security/testing gates. Dependencies are called out below.
+Phases 1–3 are implemented. Phase 4 now covers the referral-attribution and conversion engine described in `docs/REFERRAL_ATTRIBUTION_AUDIT.md`. It reuses Referral/Application and commerce/payment records, and does not add a payment provider.
 
 ## Phase 1 — Authentication and security foundation (P0, now)
 
@@ -75,7 +75,19 @@ Authentication/security and customer commerce are in place. Phase 3 implements o
 | Disabled online and admin controls | Existing route guards | checkout selection, `/admin/orders` APIs/UI | Online is visibly disabled and server-rejected. Admin can search/filter orders, inspect payment attempts, update status, collect COD, and cancel eligible unpaid orders. | API role/filter tests and React checkout/admin-payment-detail tests. |
 | Legacy and reporting safety | Prior simulator/public order endpoints | legacy `/orders`, analytics, rewards/payouts | Guest single-item checkout returns 410; historic rows are labelled `legacy`. Demo/legacy payments cannot be counted as genuine revenue or payout eligible; the migration marks legacy-linked historical rewards non-payable. | Guest endpoint rejection; demo analytics/payout exclusion. |
 
-## Phase 4 — Complete creator/brand campaign operations (P1, depends on Phase 2)
+## Phase 4 — Referral attribution and conversion tracking (current)
+
+Audit baseline and sequence: [`docs/REFERRAL_ATTRIBUTION_AUDIT.md`](REFERRAL_ATTRIBUTION_AUDIT.md). Reuse `Referral` as the creator/campaign link and accepted `Application` as participation; do not introduce a parallel collaboration or referral-link identity.
+
+| Milestone | Plan | Acceptance criteria |
+|---|---|---|
+| 4.1 Data/policy foundation | Add product eligibility, durable visitor first/last touch, item-level attribution, conversion lifecycle/events and risk flags in additive migration `0005`; centralize eligibility. | Historical records retained; conversion uniqueness; date/status/application/product checks shared across click, checkout and conversion. |
+| 4.2 Creator links/click tracking | Creator-owned generate/list/deactivate APIs; collision-safe codes; rate-limited click recording; signed opaque visitor cookie; sanitized privacy-conscious event data. | Only approved creators/campaigns/products; invalid link cannot replace attribution; repeated valid referrals use last-valid model. |
+| 4.3 Commerce conversion lifecycle | Attribute only eligible order lines, prevent self-referral, persist a conversion transactionally with the order, confirm demo as simulated, leave COD pending until collection, mark cancellation terminal without deleting. | One conversion per order; duplicate requests safe; mixed cart only credits eligible lines; rewards use only eligible amount and retain demo flag. |
+| 4.4 Analytics/UI/operations | Creator link/conversion dashboard; brand campaign aggregates; admin filters, risk review and audited deactivation; pagination/date filters. | Explicit metric definitions; no customer contact/address exposure; clicks/cart events never counted as conversions. |
+| 4.5 Verification/documentation | Backend lifecycle/security/migration tests; frontend component tests; full referral-click-to-checkout integration test; docs and status updated. | Full required backend/frontend checks pass; known limits documented. PostgreSQL load, browser E2E and legal/privacy review remain separately reported if unverified. |
+
+## Phase 5 — Complete creator/brand campaign operations (P1, depends on Phase 2)
 
 | Task | Dependencies | Files/modules | Acceptance criteria | Testing |
 |---|---|---|---|---|
@@ -83,7 +95,7 @@ Authentication/security and customer commerce are in place. Phase 3 implements o
 | Campaign CRUD/discovery/invites | Phase 2 policy | campaign routes/services/UI | Edit/draft/publish/pause and filters have real persistence; brand can invite; creator requirements enforced. | Lifecycle, filtering, RBAC tests. |
 | Collaboration and deliverables | Campaign/application workflow | collaboration models/routes/UI/migration | Acceptance creates collaboration; deliverables revisions and approval are auditable and authorized. | Complete creator/brand workflow API and UI tests. |
 
-## Phase 5 — Genuine payment integration (deferred; outside Phase 3 scope)
+## Phase 6 — Genuine payment integration (deferred; outside Phase 3 scope)
 
 | Task | Dependencies | Files/modules | Acceptance criteria | Testing |
 |---|---|---|---|---|
@@ -91,14 +103,14 @@ Authentication/security and customer commerce are in place. Phase 3 implements o
 | Genuine provider adapter and verified settlement | Separate product/security approval, Order/PaymentAttempt records | Future provider adapter, signed webhook routes/config, reconciliation/refund operations | **Intentionally not implemented.** No provider chosen or connected. A later milestone must define signed webhooks, replay/idempotency, capture/refund/partial-refund, reconciliation, and separate handling from DEMO/COD. | Only after explicit approval: signature tamper/replay/idempotency, failure/cancel/refund and staging tests. No current live-money claims. |
 | Attribution persistence | Referral model/cookie policy | Existing `/r/{code}` plus signed attribution cookie in commerce service | **Implemented for checkout continuity:** configured window, signed HttpOnly cookie, verified active creator/published campaign/product compatibility; referral FK stored on order. Consent/privacy/legal review and independent abuse review remain. | Cookie tamper, campaign and product validation, order association tests; expiry boundary/browser E2E follow-up. |
 
-## Phase 6 — Rewards, ledger and payout controls (P0 financial, depends on Phase 4)
+## Phase 7 — Rewards, ledger and payout controls (P0 financial, depends on Phase 4)
 
 | Task | Dependencies | Files/modules | Acceptance criteria | Testing |
 |---|---|---|---|---|
 | Reward lifecycle worker | Verified paid/refund events | rewards service, worker, migration | Idempotent pending → eligible → approved/paid; cancel/reverse refunds and disputes; campaign limits lock-safe. | Duplicate event, partial refund, budget race and lifecycle tests. |
 | Ledger and payout approval | Reward lifecycle | ledger/payout services/admin routes/UI | Immutable balanced entries, transactional payout reservation and audited admin approve/reject/paid controls; no frontend balance authority. | Ledger invariant, concurrent payout, audit and role tests. |
 
-## Phase 7 — Reporting, discovery and trust (P1, depends on validated data)
+## Phase 8 — Reporting, discovery and trust (P1, depends on validated data)
 
 | Task | Dependencies | Files/modules | Acceptance criteria | Testing |
 |---|---|---|---|---|
@@ -106,14 +118,14 @@ Authentication/security and customer commerce are in place. Phase 3 implements o
 | Creator scores and risk review | Verified events | scoring/risk models/services/admin UI | Configurable explainable formula and review workflow; no unsupported fraud claims. | Deterministic component weights and review authorization tests. |
 | Creator matching | Profiles/campaign filters | matching service/routes/UI | Weighted explainable recommendations use available verified/self-entered data and expose reasons/limits. | Ranking, missing-data and access tests. |
 
-## Phase 8 — Messaging, notifications, admin completion (P1, depends on Phase 2)
+## Phase 9 — Messaging, notifications, admin completion (P1, depends on Phase 2)
 
 | Task | Dependencies | Files/modules | Acceptance criteria | Testing |
 |---|---|---|---|---|
 | Conversations/notifications/email | Verified users and collaboration | models/routes/services/UI | Persisted authorized conversations, read/unread, preferences; provider abstraction reports disabled mode honestly. | Access, unread state, provider and delivery failure tests. |
 | Admin operations/risk/disputes | Audit log and policy | admin routes/models/UI | Admin account bootstrap safely; review queues and sensitive actions audited and reversible per policy. | Admin-only/other-role denial and audit assertions. |
 
-## Phase 9 — Production readiness (P0 release gate; depends on all P0 work)
+## Phase 10 — Production readiness (P0 release gate; depends on all P0 work)
 
 | Task | Dependencies | Files/modules | Acceptance criteria | Testing |
 |---|---|---|---|---|
@@ -126,4 +138,4 @@ Authentication/security and customer commerce are in place. Phase 3 implements o
 - **Phase 1 authentication/security:** implemented and pushed in `16f995e`; additive migration `0002_auth_security`, Argon2id/legacy upgrade, revocable sessions, rotating HttpOnly refresh cookie, email verification/recovery, rate limits, origin checks, production configuration validation, in-memory-only access tokens and role-aware UI.
 - **Phase 2 customer commerce:** implemented and pushed in `f40dae1`; additive migration `0003_customer_commerce`, API-backed catalog, persistent customer cart, idempotent checkout, conditional inventory handling, ownership-scoped orders, signed referral continuity and responsive shop UI.
 - **Phase 3 payment options/order lifecycle:** implemented in the current milestone; migration `0004_payment_options`, backend-only no-money Demo Payment, COD unpaid/fulfillment/administrator collection, disabled Online Payment, payment-attempt history, admin order management, audit records, demo-reward non-payability and removal of legacy guest simulator. See `docs/PAYMENT_OPTIONS.md` and `IMPLEMENTATION_STATUS.md` for verified test results and limitations.
-- **Next:** broad API/schema and cross-resource ownership hardening, campaign operations and production verification. A real payment gateway is explicitly outside this product decision and requires a separate approved phase. PostgreSQL migration/concurrency testing and browser E2E remain unverified.
+- **Phase 4 (current):** referral attribution and conversion tracking. The baseline audit and incremental plan are in `docs/REFERRAL_ATTRIBUTION_AUDIT.md`; implementation is pending verification and will preserve existing referral/order workflows. PostgreSQL concurrency and browser E2E remain release follow-ups.

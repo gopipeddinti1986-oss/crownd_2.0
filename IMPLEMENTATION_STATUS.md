@@ -54,6 +54,11 @@ Updated: 2026-11-25, after Phase 3 payment-option and order-lifecycle implementa
 - [x] Inventory decrement/restoration is guarded for checkout, demo failure, and eligible cancellation; delivered orders cannot be cancelled. Fulfillment state changes are admin-only, transition-checked and audit-logged.
 - [x] Admin order search/filter/detail foundation and payment attempt visibility are available. Customer order details show payment method/status/reference; demo referral rewards are marked non-payable, while COD referral rewards are created after collection.
 
+### Phase 4 — Referral attribution and conversion engine (in progress)
+
+- [x] Baseline code audit completed and captured in [`docs/REFERRAL_ATTRIBUTION_AUDIT.md`](docs/REFERRAL_ATTRIBUTION_AUDIT.md), including the incremental acceptance plan and explicit baseline risks.
+- [ ] Referral link management, click/visitor attribution, item-level conversion lifecycle, risk flags, role-scoped analytics/UI, and migration/tests are pending implementation and verification. Do not claim Phase 4 complete yet.
+
 ## In progress / partial
 
 - [ ] Auth is significantly safer but not independently security-audited. Rate limit is IP-based; no MFA, persistent login-failure scoring, account lockout, device/session listing, signed email provider callbacks, or session-management UI.
