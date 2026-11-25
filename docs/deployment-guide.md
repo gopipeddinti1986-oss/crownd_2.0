@@ -14,6 +14,6 @@ Authentication now has strong password hashing, short-lived server-checked acces
 - Rate limits: use managed Redis via `RATE_LIMIT_STORAGE_URI`, configure availability/monitoring, and test multi-instance behavior. Production refuses in-memory limit storage.
 - Email: set `EMAIL_MODE=smtp`, SMTP host/port, credentials where needed, `SMTP_STARTTLS=true`, and `EMAIL_FROM`. Confirm actual delivery, bounce handling and link origin; no provider account is included.
 - Enable TLS, CSP, observability, error/metrics alerts, migration/rollback runbook, dependency scanning and security review. Auth logs avoid secrets/PII but still require retention controls.
-- Payments/storage: no live payment, object storage or production email vendor adapter beyond configurable SMTP is provisioned. Do not enable a live release until payment signatures/webhooks/refunds, financial ledger controls and payouts are implemented and audited.
+- Payments/storage: Phase 3 supports only an in-process DEMO outcome (no money/provider) and manual COD collection attestation; online payment is disabled. No provider, object storage or production email vendor beyond configurable SMTP is provisioned. Any real provider requires a separate approved implementation, security review and verification of signatures/webhooks/refunds, ledger controls and payouts.
 
-Never deploy with demo seed, local simulator, SQLite on ephemeral disk, default credentials, wildcard CORS, development email, or default JWT secret. Current repo is not yet production-ready.
+Never mistake DEMO records for genuine payment, deploy with demo seed, use SQLite on ephemeral disk, default credentials, wildcard CORS, development email, or default JWT secret. Current repo is not yet production-ready.

@@ -122,35 +122,9 @@ def track_referral(code:str,response:Response,db:Session=Depends(get_db)):
     p=db.get(Product,c.product_id) if c.product_id else None
     return {"ok":True,"campaign_id":c.id,"product_id":p.id if p else None,"destination":f"/products/{p.id}" if p else "/shop","attribution_window_days":settings.attribution_days}
 
-@router.post("/orders",status_code=201)
-def create_order(body:dict,db:Session=Depends(get_db)):
-    p=db.get(Product,int(body.get("product_id",0)))
-    qty=int(body.get("quantity",1))
-    if not p or p.status!="active": raise HTTPException(404,"Product not found")
-    if qty<1 or qty>p.stock: raise HTTPException(409,"Requested quantity is unavailable")
-    ref=None
-    if body.get("referral_code"):
-        ref=db.scalar(select(Referral).where(Referral.code==str(body["referral_code"]).upper(),Referral.active==True))
-        if not ref: raise HTTPException(422,"Referral code is invalid")
-        c=db.get(Campaign,ref.campaign_id)
-        if c.status!="published" or c.product_id not in (None,p.id): raise HTTPException(422,"Referral is not eligible for this product")
-    if not body.get("customer_name") or not body.get("customer_email"): raise HTTPException(422,"Customer name and email are required")
-    order=Order(public_id="CR-"+uuid4().hex[:12].upper(),customer_name=body["customer_name"],customer_email=body["customer_email"].lower(),product_id=p.id,quantity=qty,amount=money(p.price*qty),referral_id=ref.id if ref else None)
-    db.add(order); p.stock-=qty; db.flush()
-    # Simulator is explicitly development-only; production provider must verify payment server-side.
-    if body.get("simulate_payment") is True and (settings.payment_mode!="simulator" or settings.app_env!="development"):
-        raise HTTPException(403,"The local payment simulator is only available in development")
-    if settings.payment_mode=="simulator" and settings.app_env=="development" and body.get("simulate_payment") is True:
-        order.payment_status="paid"; order.status="paid"
-        if ref:
-            c=db.get(Campaign,ref.campaign_id); rate=Decimal(c.reward_rate)
-            reward=calculate_reward(Decimal(order.amount),c.reward_model,rate)
-            budget_used=db.scalar(select(func.coalesce(func.sum(Reward.amount),0)).join(Order,Reward.order_id==Order.id).where(Order.referral_id==ref.id)) or Decimal(0)
-            if c.budget<=0 or Decimal(str(budget_used))+reward<=c.budget:
-                db.add(Reward(order_id=order.id,creator_id=ref.creator_id,amount=reward,status="pending",eligible_at=datetime.now(timezone.utc)+timedelta(days=30)))
-                db.add(LedgerEntry(reference=order.public_id,user_id=ref.creator_id,entry_type="reward_pending",amount=reward))
-    db.commit(); db.refresh(order)
-    return {"id":order.id,"order_id":order.public_id,"amount":float(order.amount),"payment_status":order.payment_status,"status":order.status,"payment_mode":settings.payment_mode}
+@router.post("/orders",status_code=410)
+def create_order():
+    raise HTTPException(410,"Guest single-product checkout is retired. Use authenticated cart checkout and select a payment method.")
 @router.get("/orders")
 def list_orders(db:Session=Depends(get_db),user:User=Depends(current_user)):
     if user.role=="admin": rows=db.scalars(select(Order).order_by(Order.created_at.desc())).all()
@@ -161,10 +135,10 @@ def list_orders(db:Session=Depends(get_db),user:User=Depends(current_user)):
 
 @router.get("/rewards/me")
 def my_rewards(db:Session=Depends(get_db),user:User=Depends(require_role("creator"))):
-    return [{"id":r.id,"order_id":db.get(Order,r.order_id).public_id,"amount":float(r.amount),"status":r.status,"eligible_at":r.eligible_at.isoformat()} for r in db.scalars(select(Reward).where(Reward.creator_id==user.id).order_by(Reward.created_at.desc())).all()]
+    return [{"id":r.id,"order_id":db.get(Order,r.order_id).public_id,"amount":float(r.amount),"status":r.status,"eligible_at":r.eligible_at.isoformat(),"is_demo":r.is_demo,"payable":not r.is_demo and r.status=="eligible"} for r in db.scalars(select(Reward).where(Reward.creator_id==user.id).order_by(Reward.created_at.desc())).all()]
 @router.post("/payouts")
 def request_payout(db:Session=Depends(get_db),user:User=Depends(require_role("creator"))):
-    available=db.scalar(select(func.coalesce(func.sum(Reward.amount),0)).where(Reward.creator_id==user.id,Reward.status=="eligible")) or Decimal(0)
+    available=db.scalar(select(func.coalesce(func.sum(Reward.amount),0)).where(Reward.creator_id==user.id,Reward.status=="eligible",Reward.is_demo.is_(False))) or Decimal(0)
     pending=db.scalar(select(func.coalesce(func.sum(Payout.amount),0)).where(Payout.creator_id==user.id,Payout.status.in_(["requested","approved"]))) or Decimal(0)
     amount=Decimal(str(available))-Decimal(str(pending))
     if amount<Decimal(settings.minimum_payout): raise HTTPException(409,f"Eligible balance must be at least ₹{settings.minimum_payout}")
@@ -173,18 +147,18 @@ def request_payout(db:Session=Depends(get_db),user:User=Depends(require_role("cr
 @router.get("/analytics/overview")
 def analytics(db:Session=Depends(get_db),user:User=Depends(current_user)):
     if user.role=="admin":
-        users=db.scalar(select(func.count(User.id))) or 0; campaigns=db.scalar(select(func.count(Campaign.id))) or 0; orders=db.scalar(select(func.count(Order.id)).where(Order.payment_status=="paid")) or 0; gmv=db.scalar(select(func.coalesce(func.sum(Order.amount),0)).where(Order.payment_status=="paid")) or 0
+        users=db.scalar(select(func.count(User.id))) or 0; campaigns=db.scalar(select(func.count(Campaign.id))) or 0; orders=db.scalar(select(func.count(Order.id)).where(Order.payment_status=="paid",Order.payment_method.in_(["cod","online"]))) or 0; gmv=db.scalar(select(func.coalesce(func.sum(Order.amount),0)).where(Order.payment_status=="paid",Order.payment_method.in_(["cod","online"]))) or 0
         return {"users":users,"campaigns":campaigns,"orders":orders,"gmv":float(gmv)}
     if user.role=="brand":
         campaigns=db.scalars(select(Campaign).where(Campaign.brand_id==user.id)).all(); ids=[c.id for c in campaigns]
         products=db.select if False else None
         clicks=db.scalar(select(func.coalesce(func.sum(Referral.clicks),0)).where(Referral.campaign_id.in_(ids))) if ids else 0
-        orders=db.scalars(select(Order).join(Referral,Referral.id==Order.referral_id).join(Campaign,Campaign.id==Referral.campaign_id).where(Campaign.brand_id==user.id,Order.payment_status=="paid")).all()
-        return {"campaigns":len(campaigns),"clicks":clicks or 0,"orders":len(orders),"revenue":float(sum((o.amount for o in orders),Decimal(0))),"rewards":float(db.scalar(select(func.coalesce(func.sum(Reward.amount),0)).join(Order,Reward.order_id==Order.id).join(Referral,Referral.id==Order.referral_id).join(Campaign,Campaign.id==Referral.campaign_id).where(Campaign.brand_id==user.id)) or 0)}
+        orders=db.scalars(select(Order).join(Referral,Referral.id==Order.referral_id).join(Campaign,Campaign.id==Referral.campaign_id).where(Campaign.brand_id==user.id,Order.payment_status=="paid",Order.payment_method.in_(["cod","online"]))).all()
+        return {"campaigns":len(campaigns),"clicks":clicks or 0,"orders":len(orders),"revenue":float(sum((o.amount for o in orders),Decimal(0))),"rewards":float(db.scalar(select(func.coalesce(func.sum(Reward.amount),0)).join(Order,Reward.order_id==Order.id).join(Referral,Referral.id==Order.referral_id).join(Campaign,Campaign.id==Referral.campaign_id).where(Campaign.brand_id==user.id,Reward.is_demo.is_(False))) or 0)}
     if user.role=="creator":
         refs=db.scalars(select(Referral).where(Referral.creator_id==user.id)).all(); ids=[r.id for r in refs]
-        rewards=db.scalars(select(Reward).where(Reward.creator_id==user.id)).all()
-        orders=db.scalar(select(func.count(Order.id)).where(Order.referral_id.in_(ids),Order.payment_status=="paid")) if ids else 0
+        rewards=db.scalars(select(Reward).where(Reward.creator_id==user.id,Reward.is_demo.is_(False))).all()
+        orders=db.scalar(select(func.count(Order.id)).where(Order.referral_id.in_(ids),Order.payment_status=="paid",Order.payment_method.in_(["cod","online"]))) if ids else 0
         return {"clicks":sum(r.clicks for r in refs),"orders":orders or 0,"earnings":float(sum((r.amount for r in rewards),Decimal(0))),"pending":float(sum((r.amount for r in rewards if r.status=="pending"),Decimal(0))),"eligible":float(sum((r.amount for r in rewards if r.status=="eligible"),Decimal(0))),"active_campaigns":len(refs)}
     return {"orders":db.scalar(select(func.count(Order.id)).where(Order.customer_email==user.email)) or 0}
 @router.get("/ai/matches/{campaign_id}")
@@ -210,10 +184,10 @@ def matches(campaign_id:int,db:Session=Depends(get_db),user:User=Depends(require
 def analytics_timeseries(db:Session=Depends(get_db),user:User=Depends(current_user)):
     from calendar import month_abbr
     from collections import defaultdict
-    if user.role=="admin": stmt=select(Order).where(Order.payment_status=="paid")
-    elif user.role=="brand": stmt=select(Order).join(Product,Product.id==Order.product_id).where(Product.brand_id==user.id,Order.payment_status=="paid")
-    elif user.role=="creator": stmt=select(Order).join(Referral,Referral.id==Order.referral_id).where(Referral.creator_id==user.id,Order.payment_status=="paid")
-    else: stmt=select(Order).where(Order.customer_email==user.email,Order.payment_status=="paid")
+    if user.role=="admin": stmt=select(Order).where(Order.payment_status=="paid",Order.payment_method.in_(["cod","online"]))
+    elif user.role=="brand": stmt=select(Order).join(Product,Product.id==Order.product_id).where(Product.brand_id==user.id,Order.payment_status=="paid",Order.payment_method.in_(["cod","online"]))
+    elif user.role=="creator": stmt=select(Order).join(Referral,Referral.id==Order.referral_id).where(Referral.creator_id==user.id,Order.payment_status=="paid",Order.payment_method.in_(["cod","online"]))
+    else: stmt=select(Order).where(Order.customer_email==user.email,Order.payment_status=="paid",Order.payment_method.in_(["cod","online"]))
     since=datetime.now(timezone.utc)-timedelta(days=210)
     monthly=defaultdict(lambda: {"revenue":Decimal(0),"orders":0})
     for order in db.scalars(stmt.where(Order.created_at>=since)).all():

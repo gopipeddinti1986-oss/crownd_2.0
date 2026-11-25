@@ -32,7 +32,7 @@ The repository is not a legacy multi-module app: its initial commit was a README
 
 ### Phase sequence
 
-The authentication/security hardening phase is first. Do not implement real payments or payouts until money lifecycle safeguards are specified and tested. Dependencies between phases are called out below.
+Authentication/security and customer commerce are in place. Phase 3 implements only backend-simulated DEMO and offline COD collection controls; the explicit product decision is no gateway or online-money integration in this milestone. A future genuine payment provider requires separate approval, reviewed lifecycle design, and security/testing gates. Dependencies are called out below.
 
 ## Phase 1 — Authentication and security foundation (P0, now)
 
@@ -65,7 +65,17 @@ The authentication/security hardening phase is first. Do not implement real paym
 | Referral continuity | Existing `/r/{code}` tracking and attribution rules | Signed HttpOnly referral-window cookie, cart summary/checkout, order referral FK | Existing referral route remains source of attribution; validate active/verified creator, active published campaign and product eligibility; no caller-supplied creator ID/code at new checkout; persist order referral relation. | Cookie tampering, campaign/product mismatch, expired/invalid referral and referral customer-journey API tests. |
 | User-facing flow and evidence | Above endpoints | `CustomerCommerce.tsx`, `commerce.css`, App routes and docs | `/shop`, `/products/:id`, `/cart`, `/checkout`, `/orders`, `/orders/:id`; responsive accessible empty/loading/error states and actual API interactions. No false payment-completion message. | Vitest component/API tests, lint/typecheck/build. Browser E2E and production-grade DB concurrency tests remain release follow-ups. |
 
-## Phase 3 — Complete creator/brand campaign operations (P1, depends on Phase 2)
+## Phase 3 — Payment options and order lifecycle (implemented; no gateway)
+
+| Task | Dependencies | Files/modules | Acceptance criteria | Testing |
+|---|---|---|---|---|
+| Payment records and extensible foundation | Phase 2 `Order` and checkout | `Order` metadata, `PaymentAttempt`, migration `0004_payment_options` | Fixed-precision amount/currency, method/status/reference/notes/confirmed actor/time and attempt idempotency; old orders backfill as `legacy`; no external SDK/provider abstraction scaffolding beyond the current order/attempt data model. | Fresh SQLite upgrade, downgrade/re-upgrade; invalid state/method constraints; PostgreSQL still unverified. |
+| Demo payment | Payment attempt + server-derived checkout | `services/payments.py`, checkout, customer order UI | In-process backend simulation only. Success is tagged `DEMO-`, failure marks failed/cancelled and restores inventory; retries are idempotent; checkout never accepts a client-supplied paid state. Demo rewards are flagged non-payable and excluded from revenue/payout eligibility. | Success/failure, duplicate key/attempt, inventory restoration, referral reward and payout exclusion tests. |
+| COD lifecycle | Payment attempts + admin authorization | commerce routes, admin order panel, audit log | COD is confirmed/unpaid at checkout; admins alone update fulfillment and confirm cash after delivery; collector/time/internal reference recorded once; COD cancellation clears the unpaid obligation and restores stock. | COD unpaid through fulfillment, unauthenticated/non-admin denial, duplicate collection, audit, cancellation/stock restore tests. |
+| Disabled online and admin controls | Existing route guards | checkout selection, `/admin/orders` APIs/UI | Online is visibly disabled and server-rejected. Admin can search/filter orders, inspect payment attempts, update status, collect COD, and cancel eligible unpaid orders. | API role/filter tests and React checkout/admin-payment-detail tests. |
+| Legacy and reporting safety | Prior simulator/public order endpoints | legacy `/orders`, analytics, rewards/payouts | Guest single-item checkout returns 410; historic rows are labelled `legacy`. Demo/legacy payments cannot be counted as genuine revenue or payout eligible; the migration marks legacy-linked historical rewards non-payable. | Guest endpoint rejection; demo analytics/payout exclusion. |
+
+## Phase 4 — Complete creator/brand campaign operations (P1, depends on Phase 2)
 
 | Task | Dependencies | Files/modules | Acceptance criteria | Testing |
 |---|---|---|---|---|
@@ -73,22 +83,22 @@ The authentication/security hardening phase is first. Do not implement real paym
 | Campaign CRUD/discovery/invites | Phase 2 policy | campaign routes/services/UI | Edit/draft/publish/pause and filters have real persistence; brand can invite; creator requirements enforced. | Lifecycle, filtering, RBAC tests. |
 | Collaboration and deliverables | Campaign/application workflow | collaboration models/routes/UI/migration | Acceptance creates collaboration; deliverables revisions and approval are auditable and authorized. | Complete creator/brand workflow API and UI tests. |
 
-## Phase 4 — Customer commerce and verified payments (P0 financial, depends on Phase 2)
+## Phase 5 — Genuine payment integration (deferred; outside Phase 3 scope)
 
 | Task | Dependencies | Files/modules | Acceptance criteria | Testing |
 |---|---|---|---|---|
-| Cart and order model | Product APIs/ownership | `Cart`/`CartItem`/`OrderItem`, migration `0003_customer_commerce`, commerce API/UI | **Implemented:** persistent signed-in user cart, multi-line fixed-precision order totals, address snapshots, idempotency, stock decrement/restoration, ownership and status rules. Guest carts/address book/quote remain out of scope; no payment is collected. | 25 backend tests include totals/idempotency/stale stock/owner/cancel/referral; concurrency stress remains open. |
-| Payment provider abstraction | Order model, credentials | payment adapter, signed webhook routes/config, UI | Still not implemented: Razorpay test-mode adapter only when configured; signature verification, webhook dedupe/idempotency; frontend cannot mark paid; simulator remains development-only. | Signature tamper/replay/idempotency, failed/cancelled/refund tests; no live-money claims. |
+| Cart and order model | Product APIs/ownership | `Cart`/`CartItem`/`OrderItem`, migration `0003_customer_commerce`, commerce API/UI | **Implemented in Phase 2:** persistent account cart, multi-line Decimal totals, address snapshots, idempotency, inventory safety, ownership. Guest carts/address book/shipping quote remain unsupported. | Phase 2 coverage and limitations are recorded in `IMPLEMENTATION_STATUS.md`; PostgreSQL contention remains open. |
+| Genuine provider adapter and verified settlement | Separate product/security approval, Order/PaymentAttempt records | Future provider adapter, signed webhook routes/config, reconciliation/refund operations | **Intentionally not implemented.** No provider chosen or connected. A later milestone must define signed webhooks, replay/idempotency, capture/refund/partial-refund, reconciliation, and separate handling from DEMO/COD. | Only after explicit approval: signature tamper/replay/idempotency, failure/cancel/refund and staging tests. No current live-money claims. |
 | Attribution persistence | Referral model/cookie policy | Existing `/r/{code}` plus signed attribution cookie in commerce service | **Implemented for checkout continuity:** configured window, signed HttpOnly cookie, verified active creator/published campaign/product compatibility; referral FK stored on order. Consent/privacy/legal review and independent abuse review remain. | Cookie tamper, campaign and product validation, order association tests; expiry boundary/browser E2E follow-up. |
 
-## Phase 5 — Rewards, ledger and payout controls (P0 financial, depends on Phase 4)
+## Phase 6 — Rewards, ledger and payout controls (P0 financial, depends on Phase 4)
 
 | Task | Dependencies | Files/modules | Acceptance criteria | Testing |
 |---|---|---|---|---|
 | Reward lifecycle worker | Verified paid/refund events | rewards service, worker, migration | Idempotent pending → eligible → approved/paid; cancel/reverse refunds and disputes; campaign limits lock-safe. | Duplicate event, partial refund, budget race and lifecycle tests. |
 | Ledger and payout approval | Reward lifecycle | ledger/payout services/admin routes/UI | Immutable balanced entries, transactional payout reservation and audited admin approve/reject/paid controls; no frontend balance authority. | Ledger invariant, concurrent payout, audit and role tests. |
 
-## Phase 6 — Reporting, discovery and trust (P1, depends on validated data)
+## Phase 7 — Reporting, discovery and trust (P1, depends on validated data)
 
 | Task | Dependencies | Files/modules | Acceptance criteria | Testing |
 |---|---|---|---|---|
@@ -96,14 +106,14 @@ The authentication/security hardening phase is first. Do not implement real paym
 | Creator scores and risk review | Verified events | scoring/risk models/services/admin UI | Configurable explainable formula and review workflow; no unsupported fraud claims. | Deterministic component weights and review authorization tests. |
 | Creator matching | Profiles/campaign filters | matching service/routes/UI | Weighted explainable recommendations use available verified/self-entered data and expose reasons/limits. | Ranking, missing-data and access tests. |
 
-## Phase 7 — Messaging, notifications, admin completion (P1, depends on Phase 2)
+## Phase 8 — Messaging, notifications, admin completion (P1, depends on Phase 2)
 
 | Task | Dependencies | Files/modules | Acceptance criteria | Testing |
 |---|---|---|---|---|
 | Conversations/notifications/email | Verified users and collaboration | models/routes/services/UI | Persisted authorized conversations, read/unread, preferences; provider abstraction reports disabled mode honestly. | Access, unread state, provider and delivery failure tests. |
 | Admin operations/risk/disputes | Audit log and policy | admin routes/models/UI | Admin account bootstrap safely; review queues and sensitive actions audited and reversible per policy. | Admin-only/other-role denial and audit assertions. |
 
-## Phase 8 — Production readiness (P0 release gate; depends on all P0 work)
+## Phase 9 — Production readiness (P0 release gate; depends on all P0 work)
 
 | Task | Dependencies | Files/modules | Acceptance criteria | Testing |
 |---|---|---|---|---|
@@ -112,7 +122,8 @@ The authentication/security hardening phase is first. Do not implement real paym
 
 ## Current phase
 
-- **Audit and roadmap:** complete. The initial branch was clean at `75601c8`; baseline tests/build and the existing preview/API were verified.
-- **Phase 1 authentication/security:** implemented and pushed in `16f995e`; additive migration `0002_auth_security`, Argon2id/legacy upgrade, revocable sessions, rotating HttpOnly refresh cookie, email verification/recovery with explicit SMTP/no-send modes, rate limits, origin checks, production configuration validation, in-memory-only access tokens, protected UI and role navigation.
-- **Phase 2 customer commerce:** implemented in the current working tree; additive migration `0003_customer_commerce`, API-backed catalog/details, authenticated persistent cart, idempotent multi-line checkout, conditional stock decrement/cancellation restore, owner-scoped order history/detail/lifecycle, signed referral-cookie continuity, responsive storefront and component/API tests. Verified evidence/limits are in `IMPLEMENTATION_STATUS.md`.
-- **Next:** finish broad Phase 2 API schema and cross-resource policy hardening, then creator/brand operational breadth. Payment-provider integration, PostgreSQL concurrency/load testing and financial releases remain blocked/unverified. Do not describe the customer checkout as paid or production-ready.
+- **Audit and roadmap:** complete; the original branch baseline and prior Phase 1/2 evidence are recorded above and in `IMPLEMENTATION_STATUS.md`.
+- **Phase 1 authentication/security:** implemented and pushed in `16f995e`; additive migration `0002_auth_security`, Argon2id/legacy upgrade, revocable sessions, rotating HttpOnly refresh cookie, email verification/recovery, rate limits, origin checks, production configuration validation, in-memory-only access tokens and role-aware UI.
+- **Phase 2 customer commerce:** implemented and pushed in `f40dae1`; additive migration `0003_customer_commerce`, API-backed catalog, persistent customer cart, idempotent checkout, conditional inventory handling, ownership-scoped orders, signed referral continuity and responsive shop UI.
+- **Phase 3 payment options/order lifecycle:** implemented in the current milestone; migration `0004_payment_options`, backend-only no-money Demo Payment, COD unpaid/fulfillment/administrator collection, disabled Online Payment, payment-attempt history, admin order management, audit records, demo-reward non-payability and removal of legacy guest simulator. See `docs/PAYMENT_OPTIONS.md` and `IMPLEMENTATION_STATUS.md` for verified test results and limitations.
+- **Next:** broad API/schema and cross-resource ownership hardening, campaign operations and production verification. A real payment gateway is explicitly outside this product decision and requires a separate approved phase. PostgreSQL migration/concurrency testing and browser E2E remain unverified.

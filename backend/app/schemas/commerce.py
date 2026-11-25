@@ -1,4 +1,5 @@
 from decimal import Decimal
+from typing import Literal
 import re
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
@@ -39,6 +40,7 @@ class ShippingAddressInput(BaseModel):
 class CheckoutRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     shipping_address: ShippingAddressInput
+    payment_method: Literal["demo", "cod", "online"]
 
 class ProductCreate(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")

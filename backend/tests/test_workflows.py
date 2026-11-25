@@ -250,10 +250,14 @@ def test_campaign_application_referral_order_and_reward(client,emails):
     assert client.patch(f"/api/v1/applications/{applications[0]['id']}",headers=brand,json={"status":"accepted"}).status_code==200
     ref=client.get("/api/v1/referrals/me",headers=creator).json()[0]
     assert client.get(f"/api/v1/r/{ref['code']}").status_code==200
-    order=client.post("/api/v1/orders",json={"customer_name":"Customer","customer_email":"customer@example.com","product_id":product["id"],"quantity":1,"referral_code":ref["code"],"simulate_payment":True})
-    assert order.status_code==201 and order.json()["payment_status"]=="paid"
+    assert client.post("/api/v1/orders",json={"customer_name":"Guest","customer_email":"guest@example.com","product_id":product["id"],"quantity":1,"simulate_payment":True}).status_code==410
+    _,customer=verified_login(client,emails,"customerflow@test.example","customer","Flow Customer")
+    assert client.post("/api/v1/cart/items",headers=customer,json={"product_id":product["id"],"quantity":1}).status_code==201
+    address={"name":"Flow Customer","phone":"+91 98765 43210","line1":"12 Market Road","city":"Rajamahendravaram","state":"Andhra Pradesh","postal_code":"533101","country":"IN"}
+    order=client.post("/api/v1/checkout",headers={**customer,"Idempotency-Key":"campaign-demo-order-001"},json={"shipping_address":address,"payment_method":"demo"})
+    assert order.status_code==201 and order.json()["payment_status"]=="paid" and order.json()["payment_method"]=="demo"
     reward=client.get("/api/v1/rewards/me",headers=creator).json()
-    assert len(reward)==1 and reward[0]["amount"]==200.0 and reward[0]["status"]=="pending"
+    assert len(reward)==1 and reward[0]["amount"]==200.0 and reward[0]["status"]=="pending" and reward[0]["is_demo"] is True
 
 def test_campaign_duplicate_application_prevented(client,emails):
     _,brand=verified_login(client,emails,"dupbrand@test.example","brand","Dup Brand")

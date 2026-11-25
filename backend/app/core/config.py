@@ -13,7 +13,6 @@ class Settings(BaseSettings):
     cookie_samesite: str = "lax"
     attribution_days: int = 7
     minimum_payout: str = "500.00"
-    payment_mode: str = "simulator"
     app_env: str = "development"
     rate_limit_storage_uri: str = "memory://"
     rate_limit_enabled: bool = True

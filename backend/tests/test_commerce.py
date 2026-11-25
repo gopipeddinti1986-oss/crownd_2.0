@@ -8,7 +8,8 @@ from sqlalchemy.pool import StaticPool
 from app.api.v1.auth import limiter
 from app.database import Base, get_db
 from app.main import app
-from app.models.entities import BrandProfile, Campaign, Cart, CartItem, Order, OrderItem, Product, Referral, User
+from app.models.entities import BrandProfile, Campaign, Cart, CartItem, Order, OrderItem, PaymentAttempt, Product, Referral, Reward, User
+from app.core.config import settings
 from app.security import create_access_token, hash_password
 from app.services.auth import create_session
 
@@ -116,12 +117,12 @@ def test_checkout_trusts_database_prices_is_idempotent_and_records_order_items(c
     key = "order-retry-key-0001"
     first = commerce_client.post("/api/v1/checkout", headers={**customer_headers, "Idempotency-Key": key}, json={**address(), "price": 0.01, "amount": 0.01})
     assert first.status_code == 422  # Checkout schema rejects client-supplied totals.
-    first = commerce_client.post("/api/v1/checkout", headers={**customer_headers, "Idempotency-Key": key}, json=address())
+    first = commerce_client.post("/api/v1/checkout", headers={**customer_headers, "Idempotency-Key": key}, json={**address(), "payment_method": "cod"})
     assert first.status_code == 201, first.text
     order = first.json()
-    assert order["amount"] == "160.00" and order["payment_status"] == "pending" and order["status"] == "pending"
+    assert order["amount"] == "160.00" and order["payment_method"] == "cod" and order["payment_status"] == "unpaid" and order["status"] == "confirmed"
     assert order["items"][0]["unit_price"] == "80.00" and order["items"][0]["quantity"] == 2
-    replay = commerce_client.post("/api/v1/checkout", headers={**customer_headers, "Idempotency-Key": key}, json=address())
+    replay = commerce_client.post("/api/v1/checkout", headers={**customer_headers, "Idempotency-Key": key}, json={**address(), "payment_method": "cod"})
     assert replay.status_code == 200 and replay.json()["id"] == order["id"]
     with commerce_db() as db:
         product = db.get(Product, product_id)
@@ -145,9 +146,9 @@ def test_inventory_race_guard_unavailable_cart_and_cancel_restores_stock(commerc
     product_id = create_product(commerce_db, brand, stock=2, sale_price=None)
     assert add_to_cart(commerce_client, customer_headers, product_id, 2).status_code == 201
     assert add_to_cart(commerce_client, other_headers, product_id, 1).status_code == 201
-    first = commerce_client.post("/api/v1/checkout", headers={**customer_headers, "Idempotency-Key": "inventory-order-0001"}, json=address())
+    first = commerce_client.post("/api/v1/checkout", headers={**customer_headers, "Idempotency-Key": "inventory-order-0001"}, json={**address(), "payment_method": "cod"})
     assert first.status_code == 201
-    second = commerce_client.post("/api/v1/checkout", headers={**other_headers, "Idempotency-Key": "inventory-order-0002"}, json=address())
+    second = commerce_client.post("/api/v1/checkout", headers={**other_headers, "Idempotency-Key": "inventory-order-0002"}, json={**address(), "payment_method": "cod"})
     assert second.status_code == 409
     assert commerce_client.get("/api/v1/cart", headers=other_headers).json()["unavailable_count"] == 1
     assert commerce_client.get(f"/api/v1/orders/{first.json()['id']}", headers=other_headers).status_code == 404
@@ -156,13 +157,13 @@ def test_inventory_race_guard_unavailable_cart_and_cancel_restores_stock(commerc
     assert cancelled.status_code == 200 and cancelled.json()["status"] == "cancelled"
     assert commerce_client.get("/api/v1/products", params={"brand_id": brand}).json()["items"][0]["stock"] == 2
     assert commerce_client.post(f"/api/v1/orders/{first.json()['id']}/cancel", headers=customer_headers).status_code == 409
-    assert commerce_client.patch(f"/api/v1/orders/{first.json()['id']}/status", headers=brand_headers, json={"status": "processing"}).status_code == 409
+    assert commerce_client.patch(f"/api/v1/orders/{first.json()['id']}/status", headers=brand_headers, json={"status": "processing"}).status_code == 403
 
 
 def test_referral_cookie_attribution_is_signed_and_validated_at_checkout(commerce_db, commerce_client):
     brand, _ = create_account(commerce_db, "Noya", "brand@example.com", "brand")
     customer_id, customer_headers = create_account(commerce_db, "Customer", "customer@example.com", "customer")
-    creator_id, _ = create_account(commerce_db, "Jules Lane", "creator@example.com", "creator")
+    creator_id, creator_headers = create_account(commerce_db, "Jules Lane", "creator@example.com", "creator")
     product_id = create_product(commerce_db, brand)
     with commerce_db() as db:
         campaign = Campaign(brand_id=brand, product_id=product_id, title="Ritual", slug="ritual", description="", category="Beauty", platforms="Instagram", reward_model="percentage", reward_rate=Decimal("10"), budget=Decimal("1000"), status="published")
@@ -175,15 +176,20 @@ def test_referral_cookie_attribution_is_signed_and_validated_at_checkout(commerc
     assert tracked.status_code == 200 and "crownd_referral=" in tracked.headers["set-cookie"]
     assert tracked.json()["destination"] == f"/products/{product_id}"
     assert add_to_cart(commerce_client, customer_headers, product_id).status_code == 201
-    created = commerce_client.post("/api/v1/checkout", headers={**customer_headers, "Idempotency-Key": "referral-order-0001"}, json=address())
+    created = commerce_client.post("/api/v1/checkout", headers={**customer_headers, "Idempotency-Key": "referral-order-0001"}, json={**address(), "payment_method": "demo"})
     assert created.status_code == 201 and created.json()["referral"]["creator_name"] == "Jules Lane"
     with commerce_db() as db:
         order = db.scalar(select(Order).where(Order.customer_id == customer_id))
-        assert order.referral_id is not None
+        assert order.referral_id is not None and order.payment_method == "demo"
+        demo_reward = db.scalar(select(Reward).where(Reward.order_id == order.id))
+        assert demo_reward and demo_reward.is_demo is True
+        demo_reward.status = "eligible"
+        db.commit()
+    assert commerce_client.post("/api/v1/payouts", headers=creator_headers).status_code == 409
     # Tampering with the attribution cookie cannot assign an arbitrary referral.
     commerce_client.cookies.set("crownd_referral", "1.9999999999.forged")
     assert add_to_cart(commerce_client, customer_headers, product_id).status_code == 201
-    uncredited = commerce_client.post("/api/v1/checkout", headers={**customer_headers, "Idempotency-Key": "tampered-referral-001"}, json=address())
+    uncredited = commerce_client.post("/api/v1/checkout", headers={**customer_headers, "Idempotency-Key": "tampered-referral-001"}, json={**address(), "payment_method": "cod"})
     assert uncredited.status_code == 201 and uncredited.json()["referral"] is None
 
 
@@ -203,18 +209,143 @@ def test_checkout_cors_preflight_allows_idempotency_key(commerce_client):
 
 def test_product_stock_bounds_and_order_lifecycle_owner(commerce_db, commerce_client):
     brand, brand_headers = create_account(commerce_db, "Noya", "brand@example.com", "brand")
-    customer_id, customer_headers = create_account(commerce_db, "Customer", "customer@example.com", "customer")
+    _customer_id, customer_headers = create_account(commerce_db, "Customer", "customer@example.com", "customer")
+    _admin_id, admin_headers = create_account(commerce_db, "Admin", "admin@example.com", "admin")
     product_id = create_product(commerce_db, brand, stock=1, sale_price=None)
     assert add_to_cart(commerce_client, customer_headers, product_id, 2).status_code == 409
     assert add_to_cart(commerce_client, customer_headers, product_id).status_code == 201
-    order = commerce_client.post("/api/v1/checkout", headers={**customer_headers, "Idempotency-Key": "lifecycle-order-0001"}, json=address()).json()
-    assert commerce_client.patch(f"/api/v1/orders/{order['id']}/status", headers=brand_headers, json={"status": "confirmed"}).status_code == 200
-    assert commerce_client.patch(f"/api/v1/orders/{order['id']}/status", headers=brand_headers, json={"status": "processing"}).status_code == 409
+    order = commerce_client.post("/api/v1/checkout", headers={**customer_headers, "Idempotency-Key": "lifecycle-order-0001"}, json={**address(), "payment_method": "cod"}).json()
+    assert commerce_client.patch(f"/api/v1/orders/{order['id']}/status", headers=brand_headers, json={"status": "processing"}).status_code == 403
+    assert commerce_client.patch(f"/api/v1/orders/{order['id']}/status", headers=admin_headers, json={"status": "processing"}).status_code == 200
+    assert commerce_client.patch(f"/api/v1/orders/{order['id']}/status", headers=admin_headers, json={"status": "processing"}).status_code == 409
+    assert commerce_client.patch(f"/api/v1/orders/{order['id']}/status", headers=admin_headers, json={"status": "shipped"}).status_code == 200
+    delivered = commerce_client.patch(f"/api/v1/orders/{order['id']}/status", headers=admin_headers, json={"status": "delivered"})
+    assert delivered.status_code == 200 and delivered.json()["payment_status"] == "unpaid"
+    assert commerce_client.post(f"/api/v1/orders/{order['id']}/cancel", headers=customer_headers).status_code == 409
+
+
+def test_demo_payment_is_backend_simulated_idempotent_and_identified(commerce_db, commerce_client):
+    brand, _ = create_account(commerce_db, "Noya", "brand@example.com", "brand")
+    _customer_id, customer = create_account(commerce_db, "Customer", "customer@example.com", "customer")
+    product_id = create_product(commerce_db, brand, stock=4)
+    assert add_to_cart(commerce_client, customer, product_id, 2).status_code == 201
+    headers = {**customer, "Idempotency-Key": "demo-paid-checkout-001"}
+    placed = commerce_client.post("/api/v1/checkout", headers=headers, json={**address(), "payment_method": "demo"})
+    assert placed.status_code == 201
+    result = placed.json()
+    assert result["payment_method"] == "demo" and result["payment_status"] == "paid" and result["status"] == "confirmed"
+    assert result["transaction_reference"].startswith("DEMO-")
+    assert "no real payment" in result["payment_notes"].lower()
+    assert result["payment_attempts"][0]["status"] == "paid"
+    replay = commerce_client.post("/api/v1/checkout", headers=headers, json={**address(), "payment_method": "demo"})
+    assert replay.status_code == 200 and replay.json()["id"] == result["id"]
+    with commerce_db() as db:
+        assert db.get(Product, product_id).stock == 2
+        assert len(db.scalars(select(PaymentAttempt).where(PaymentAttempt.order_id == db.scalar(select(Order.id).where(Order.public_id == result["id"])))).all()) == 1
+
+
+def test_demo_payment_failure_cancels_order_and_restores_inventory(commerce_db, commerce_client, monkeypatch):
+    monkeypatch.setattr(settings, "app_env", "development")
+    brand, _ = create_account(commerce_db, "Noya", "brand@example.com", "brand")
+    _customer_id, customer = create_account(commerce_db, "Customer", "customer@example.com", "customer")
+    product_id = create_product(commerce_db, brand, stock=3)
+    assert add_to_cart(commerce_client, customer, product_id, 2).status_code == 201
+    headers = {**customer, "Idempotency-Key": "demo-failed-checkout-001", "X-Demo-Payment-Test-Failure": "true"}
+    failed = commerce_client.post("/api/v1/checkout", headers=headers, json={**address(), "payment_method": "demo"})
+    assert failed.status_code == 201
+    assert failed.json()["payment_method"] == "demo" and failed.json()["payment_status"] == "failed" and failed.json()["status"] == "cancelled"
+    assert failed.json()["transaction_reference"].startswith("DEMO-")
+    assert commerce_client.get("/api/v1/products", params={"brand_id": brand}).json()["items"][0]["stock"] == 3
+    replay = commerce_client.post("/api/v1/checkout", headers=headers, json={**address(), "payment_method": "demo"})
+    assert replay.status_code == 200 and replay.json()["payment_status"] == "failed"
+    with commerce_db() as db:
+        order = db.scalar(select(Order).where(Order.public_id == failed.json()["id"]))
+        assert len(db.scalars(select(PaymentAttempt).where(PaymentAttempt.order_id == order.id)).all()) == 1
+
+
+def test_cod_stays_unpaid_through_delivery_and_admin_collection_is_audited(commerce_db, commerce_client):
+    brand, brand_headers = create_account(commerce_db, "Noya", "brand@example.com", "brand")
+    _customer_id, customer = create_account(commerce_db, "Customer", "customer@example.com", "customer")
+    _admin_id, admin = create_account(commerce_db, "Admin", "admin@example.com", "admin")
+    product_id = create_product(commerce_db, brand, stock=2)
+    assert add_to_cart(commerce_client, customer, product_id).status_code == 201
+    order = commerce_client.post("/api/v1/checkout", headers={**customer, "Idempotency-Key": "cod-checkout-00001"}, json={**address(), "payment_method": "cod"}).json()
+    assert order["payment_method"] == "cod" and order["payment_status"] == "unpaid" and order["status"] == "confirmed"
+    assert order["transaction_reference"] is None
+    assert commerce_client.post(f"/api/v1/admin/orders/{order['id']}/collect-payment", headers=customer).status_code == 403
+    assert commerce_client.patch(f"/api/v1/orders/{order['id']}/status", headers=brand_headers, json={"status": "processing"}).status_code == 403
+    for status in ("processing", "shipped", "delivered"):
+        response = commerce_client.patch(f"/api/v1/orders/{order['id']}/status", headers=admin, json={"status": status})
+        assert response.status_code == 200, response.text
+        assert response.json()["payment_status"] == "unpaid"
+    collected = commerce_client.post(f"/api/v1/admin/orders/{order['id']}/collect-payment", headers=admin)
+    assert collected.status_code == 200
+    payload = collected.json()
+    assert payload["payment_status"] == "paid" and payload["payment_method"] == "cod"
+    assert payload["transaction_reference"].startswith("COD-COLLECT-")
+    assert payload["payment_confirmed_by"]["role"] == "admin" and payload["payment_confirmed_at"]
+    assert commerce_client.post(f"/api/v1/admin/orders/{order['id']}/collect-payment", headers=admin).status_code == 409
     with commerce_db() as db:
         stored = db.scalar(select(Order).where(Order.public_id == order["id"]))
-        stored.payment_status = "paid"  # Represents an upstream verified payment; no public endpoint can set this.
+        attempt = db.scalar(select(PaymentAttempt).where(PaymentAttempt.order_id == stored.id))
+        assert attempt.status == "paid" and attempt.confirmed_by is not None
+
+
+def test_online_payment_is_disabled_and_admin_order_filters_are_protected(commerce_db, commerce_client):
+    brand, _ = create_account(commerce_db, "Noya", "brand@example.com", "brand")
+    _customer_id, customer = create_account(commerce_db, "Customer", "customer@example.com", "customer")
+    _admin_id, admin = create_account(commerce_db, "Admin", "admin@example.com", "admin")
+    product_id = create_product(commerce_db, brand)
+    assert add_to_cart(commerce_client, customer, product_id).status_code == 201
+    rejected = commerce_client.post("/api/v1/checkout", headers={**customer, "Idempotency-Key": "online-disabled-001"}, json={**address(), "payment_method": "online"})
+    assert rejected.status_code == 409 and "coming soon" in rejected.json()["detail"]
+    assert commerce_client.get("/api/v1/admin/orders", headers=customer).status_code == 403
+    order = commerce_client.post("/api/v1/checkout", headers={**customer, "Idempotency-Key": "cod-admin-list-001"}, json={**address(), "payment_method": "cod"}).json()
+    listing = commerce_client.get("/api/v1/admin/orders", headers=admin, params={"payment_method": "cod", "payment_status": "unpaid", "status": "confirmed", "q": order["id"]})
+    assert listing.status_code == 200 and listing.json()["total"] == 1
+    assert listing.json()["items"][0]["id"] == order["id"]
+    detail = commerce_client.get(f"/api/v1/admin/orders/{order['id']}", headers=admin)
+    assert detail.status_code == 200 and detail.json()["payment_attempts"][0]["payment_method"] == "cod"
+
+
+def test_customer_cannot_submit_payment_status_or_access_another_order(commerce_db, commerce_client):
+    brand, _ = create_account(commerce_db, "Noya", "brand@example.com", "brand")
+    _customer_id, customer = create_account(commerce_db, "Customer", "customer@example.com", "customer")
+    _other_id, other = create_account(commerce_db, "Other", "other@example.com", "customer")
+    product_id = create_product(commerce_db, brand)
+    assert add_to_cart(commerce_client, customer, product_id).status_code == 201
+    malicious = commerce_client.post("/api/v1/checkout", headers={**customer, "Idempotency-Key": "payment-tamper-0001"}, json={**address(), "payment_method": "cod", "payment_status": "paid", "amount": "0.01"})
+    assert malicious.status_code == 422
+    assert add_to_cart(commerce_client, customer, product_id).status_code == 201
+    order = commerce_client.post("/api/v1/checkout", headers={**customer, "Idempotency-Key": "owner-safe-order-001"}, json={**address(), "payment_method": "cod"}).json()
+    assert commerce_client.get(f"/api/v1/orders/{order['id']}", headers=other).status_code == 404
+    assert commerce_client.post(f"/api/v1/admin/orders/{order['id']}/collect-payment", headers=other).status_code == 403
+
+
+def test_cod_referral_reward_is_created_only_after_admin_collection(commerce_db, commerce_client):
+    brand, _ = create_account(commerce_db, "Noya", "brand@example.com", "brand")
+    _customer_id, customer = create_account(commerce_db, "Customer", "customer@example.com", "customer")
+    creator_id, creator = create_account(commerce_db, "Creator", "creator@example.com", "creator")
+    _admin_id, admin = create_account(commerce_db, "Admin", "admin@example.com", "admin")
+    product_id = create_product(commerce_db, brand, sale_price=None, stock=3)
+    with commerce_db() as db:
+        campaign = Campaign(brand_id=brand, product_id=product_id, title="COD Campaign", slug="cod-campaign", description="", category="Beauty", platforms="Instagram", reward_model="percentage", reward_rate=Decimal("10"), budget=Decimal("500"), status="published")
+        db.add(campaign)
+        db.flush()
+        referral = Referral(campaign_id=campaign.id, creator_id=creator_id, code="CODCREATOR", active=True)
+        db.add(referral)
         db.commit()
-    assert commerce_client.patch(f"/api/v1/orders/{order['id']}/status", headers=brand_headers, json={"status": "processing"}).status_code == 200
-    assert commerce_client.patch(f"/api/v1/orders/{order['id']}/status", headers=brand_headers, json={"status": "shipped"}).status_code == 200
-    assert commerce_client.patch(f"/api/v1/orders/{order['id']}/status", headers=brand_headers, json={"status": "delivered"}).status_code == 200
-    assert commerce_client.post(f"/api/v1/orders/{order['id']}/cancel", headers=customer_headers).status_code == 409
+    assert commerce_client.get("/api/v1/r/CODCREATOR").status_code == 200
+    assert add_to_cart(commerce_client, customer, product_id).status_code == 201
+    order = commerce_client.post("/api/v1/checkout", headers={**customer, "Idempotency-Key": "cod-referral-order-001"}, json={**address(), "payment_method": "cod"}).json()
+    with commerce_db() as db:
+        assert db.scalar(select(Reward).where(Reward.order_id == db.scalar(select(Order.id).where(Order.public_id == order["id"])))) is None
+    for status in ("processing", "shipped", "delivered"):
+        assert commerce_client.patch(f"/api/v1/orders/{order['id']}/status", headers=admin, json={"status": status}).status_code == 200
+    assert commerce_client.post(f"/api/v1/admin/orders/{order['id']}/collect-payment", headers=admin).status_code == 200
+    with commerce_db() as db:
+        stored = db.scalar(select(Order).where(Order.public_id == order["id"]))
+        reward = db.scalar(select(Reward).where(Reward.order_id == stored.id))
+        assert reward and reward.creator_id == creator_id and reward.is_demo is False and reward.status == "pending"
+    creator_rewards = commerce_client.get("/api/v1/rewards/me", headers=creator).json()
+    assert len(creator_rewards) == 1 and creator_rewards[0]["is_demo"] is False and creator_rewards[0]["payable"] is False
