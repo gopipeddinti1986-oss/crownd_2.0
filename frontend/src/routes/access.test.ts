@@ -7,4 +7,5 @@ describe('role-aware page access',()=>{
  it('limits creator earnings and referrals to creator workspaces',()=>{expect(canAccessPath(brand,'/earnings')).toBe(false);expect(canAccessPath(creator,'/referrals')).toBe(true)});
  it('limits brand discovery/products to brand or admin accounts',()=>{expect(canAccessPath(creator,'/creators')).toBe(false);expect(canAccessPath(brand,'/products')).toBe(true);expect(canAccessPath(admin,'/products')).toBe(true)});
  it('keeps admin pages admin-only',()=>{expect(canAccessPath(brand,'/admin/users')).toBe(false);expect(canAccessPath(creator,'/admin/users')).toBe(false);expect(canAccessPath(admin,'/admin/users')).toBe(true)});
+ it('protects brand intelligence and management while retaining admin referral review',()=>{expect(canAccessPath(brand,'/brand/analytics')).toBe(true);expect(canAccessPath(creator,'/brand/analytics')).toBe(false);expect(canAccessPath(admin,'/brand/analytics')).toBe(false);expect(canAccessPath(admin,'/brand/referrals')).toBe(true)});
 });
