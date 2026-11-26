@@ -47,7 +47,7 @@
 ## Baseline checks
 
 - Frontend baseline: `npm test -- --run` — **8 test files, 35 tests passed**. Existing Recharts width/height warnings were printed by campaign-intelligence tests.
-- Backend baseline: `pytest -q` could not start because `pytest` is not installed on the current PATH (`/bin/bash: pytest: command not found`). No backend test result is inferred; install/use the repository's supported environment before claiming backend verification.
+- Backend baseline: initial `pytest -q` could not start because pytest was not on PATH. The repository's supported venv was then located and `backend/.venv/bin/pytest -q` passed **57 tests** with one existing Starlette/httpx deprecation warning. This verified baseline predates Phase 8 implementation.
 
 ## Open implementation risk
 

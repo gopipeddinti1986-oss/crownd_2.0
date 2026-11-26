@@ -34,6 +34,28 @@ services:
     depends_on:
       db: {condition: service_healthy}
       mailpit: {condition: service_started}
+  notification-worker:
+    build: ./backend
+    command: ["python", "-m", "app.worker"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://crownd:${POSTGRES_PASSWORD:-local-only-change-me}@db:5432/crownd
+      JWT_SECRET: ${JWT_SECRET:-development-only-change-me}
+      APP_ENV: ${APP_ENV:-development}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:8080}
+      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-172.16.0.0/12,127.0.0.1,::1}
+      RATE_LIMIT_STORAGE_URI: ${RATE_LIMIT_STORAGE_URI:-memory://}
+      EMAIL_MODE: ${EMAIL_MODE:-smtp}
+      EMAIL_FROM: ${EMAIL_FROM:-CROWND <no-reply@localhost>}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+    depends_on:
+      db: {condition: service_healthy}
+      mailpit: {condition: service_started}
+    restart: unless-stopped
   web:
     build: ./frontend
     ports: ["8080:80"]

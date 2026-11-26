@@ -16,7 +16,7 @@ One-use verification/password-reset tokens are random, purpose-scoped, expiry-li
 
 Email delivery is an adapter in `app/services/email.py`:
 
-- `EMAIL_MODE=disabled` is the safe local default. It does not send or log email contents/tokens; the API and UI explicitly say that no email was sent.
+- `EMAIL_MODE=disabled` is the safe local default. The API queues encrypted action mail but no message is sent; the separate worker marks it suppressed and the API/UI state no email was sent. For configured SMTP delivery, run the Phase 8 worker with the same `JWT_SECRET`; see [`PHASE_8_NOTIFICATIONS.md`](PHASE_8_NOTIFICATIONS.md).
 - `EMAIL_MODE=smtp` uses SMTP configuration. Provider errors are reduced to a generic operational error; logs omit address, body, credentials and token. Configure TLS for production.
 - Docker Compose starts a local Mailpit SMTP sink and web inbox at port 8025; messages stay local and are not delivered to recipients.
 

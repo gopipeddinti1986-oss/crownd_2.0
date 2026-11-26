@@ -140,7 +140,7 @@ Audit and implementation record: [`PHASE_7_ADMIN_AUDIT.md`](PHASE_7_ADMIN_AUDIT.
 
 The planned worker, actual payout settlement and refund lifecycle remain future work. Phase 5 already implements rule-based reward generation, simulated payout disclosure, immutable ledger entries, reversal entries, and admin reward review; it does not implement a scheduled eligibility worker, actual payout approval/transfer, gateway refunds or accounting settlement.
 
-## Phase 8 — Reporting, discovery and trust (P1, depends on validated data)
+## Deferred follow-up — Reporting, discovery and trust (the analytics foundation is Phase 6)
 
 | Task | Dependencies | Files/modules | Acceptance criteria | Testing |
 |---|---|---|---|---|
@@ -148,14 +148,21 @@ The planned worker, actual payout settlement and refund lifecycle remain future 
 | Creator scores and risk review | Verified events | scoring/risk models/services/admin UI | Configurable explainable formula and review workflow; no unsupported fraud claims. | Deterministic component weights and review authorization tests. |
 | Creator matching | Profiles/campaign filters | matching service/routes/UI | Weighted explainable recommendations use available verified/self-entered data and expose reasons/limits. | Ranking, missing-data and access tests. |
 
-## Phase 9 — Messaging, notifications, admin completion (P1, depends on Phase 2)
+## Phase 8 — Notifications, communication and workflow automation (implemented locally; not a production-readiness claim)
 
-| Task | Dependencies | Files/modules | Acceptance criteria | Testing |
-|---|---|---|---|---|
-| Conversations/notifications/email | Verified users and collaboration | models/routes/services/UI | Persisted authorized conversations, read/unread, preferences; provider abstraction reports disabled mode honestly. | Access, unread state, provider and delivery failure tests. |
-| Remaining admin bootstrap/operations gaps | Phase 7 admin foundation | deployment provisioning, notifications, support workflows | Safely provision an initial admin; implement persisted notification/support workflows only when delivery is configured. Phase 7 account controls, risk, disputes and audit are implemented. | Provisioning controls, delivery/access tests; existing Phase 7 checks in `docs/PHASE_7_ADMIN.md`. |
+Audit and implementation record: [`PHASE_8_NOTIFICATIONS_AUDIT.md`](PHASE_8_NOTIFICATIONS_AUDIT.md) and [`PHASE_8_NOTIFICATIONS.md`](PHASE_8_NOTIFICATIONS.md). The feature reuses existing account, commerce, campaign, reward, SMTP and admin systems; it introduces no second auth/business system or external broker.
 
-## Phase 10 — Production readiness (P0 release gate; depends on all P0 work)
+| Milestone | Implementation | Acceptance / verification |
+|---|---|---|
+| 8.1 Persistence and idempotency | Additive `0009_notifications` creates recipient-scoped notifications, category preferences and encrypted email outbox. Unique `(recipient_id,event_key)` constraints and same-transaction inserts protect duplicate business events. | SQLite fresh/historical migration and re-upgrade tests; PostgreSQL not verified. |
+| 8.2 Delivery worker and provider | Extend existing disabled/SMTP provider boundary; one-use verification/reset payloads are Fernet-encrypted at rest. Separate `python -m app.worker` SQL poller applies bounded exponential retry (five attempts), stale-claim recovery and static error codes. | No API request performs SMTP I/O. SMTP disabled is recorded as suppressed, not sent. At-least-once provider handoff; one worker supported, multi-process/PostgreSQL contention unverified. |
+| 8.3 Event integration and APIs | Transactional events cover checkout/COD/demo states, cancellation and admin order status/collection, campaign application/submission/review/moderation, reward creation/review/simulated payout, password reset and account lifecycle. Inbox, read/read-all, preferences and admin-only redacted delivery telemetry are authenticated. | Recipient scoping, pagination, preferences, event idempotency, unsafe URL/header rejection, generic reset behavior and no real money/shipping claims tested. |
+| 8.4 User/admin surfaces | Role-aware sidebar and unread bell badge; inbox, channel/category settings and admin delivery monitor; operations overview distinguishes SQL outbox, SMTP configuration and unmeasured worker health. | React escapes body text; no email address, content, ciphertext, tokens or provider details in admin API/UI. |
+| 8.5 Verification and operations | Backend API/worker/migration tests; frontend inbox/settings/admin monitor tests; docs, project status and roadmap updated. Compose includes a distinct worker service and local Mailpit. | Report actual local check results in `docs/PHASE_8_NOTIFICATIONS.md`; production SMTP/inbox, PostgreSQL, browser E2E and production worker liveness remain unverified. |
+
+Explicit limits: SMTP acceptance does not prove delivery; a queue worker must run with the same database and `JWT_SECRET`; changing that secret with pending encrypted rows causes those messages to fail decryption. This is an at-least-once system (a crash after provider acceptance can cause a duplicate); only one worker should be operated until multi-process testing is completed. Disabled email suppresses the queue and new users cannot verify/login. No conversation/messaging module, external email provider, real payment/payout/refund/shipping integration, or automatic dispute/risk actions are implied.
+
+## Phase 10 — Production readiness (P0 release gate; depends on Phases 1–8 and other release blockers)
 
 | Task | Dependencies | Files/modules | Acceptance criteria | Testing |
 |---|---|---|---|---|
@@ -171,3 +178,4 @@ The planned worker, actual payout settlement and refund lifecycle remain future 
 - **Phase 4 (implemented on the current development branch; verified in SQLite/local test environments):** referral attribution and conversion tracking. Reuses existing Referral/Application and commerce/payment records; attribution rules and verification evidence are in `docs/referral-attribution.md`, `docs/REFERRAL_ATTRIBUTION_AUDIT.md`, and `IMPLEMENTATION_STATUS.md`. PostgreSQL migration/concurrency, browser E2E, privacy/legal review, and paid-order refund workflow remain release follow-ups. No production-ready claim is made.
 - **Phase 6 (implemented on the current branch; local verification passed):** campaign management and trusted brand/admin analytics. Backend 53 tests and frontend 32 tests pass; lint/build, SQLite migration coverage, compileall and diff checks passed. Audit, definitions, results and limitations are recorded in `docs/PHASE_6_ANALYTICS_AUDIT.md` and `docs/PHASE_6_ANALYTICS.md`. PostgreSQL and browser E2E remain unverified.
 - **Phase 7 (implemented on the current branch; local verification passed):** secure platform administration, session-revoking restrictions, manual verification and campaign moderation, human risk investigation, disputes with append-only event history, immutable admin audit events and operations UI. Backend 57 tests and frontend 35 tests pass; SQLite migration and local quality checks passed. PostgreSQL, browser E2E and production readiness remain unverified; see `docs/PHASE_7_ADMIN_AUDIT.md` and `docs/PHASE_7_ADMIN.md`.
+- **Phase 8 (implemented locally; verification passed):** recipient-scoped notifications/preferences, encrypted retryable SQL email outbox, separate worker, transactional business/security event integration, authenticated inbox/settings APIs and admin delivery monitoring. Backend **66 passed**; frontend **38 passed**, TypeScript, ESLint, build and compileall passed; SQLite migration tests passed. SMTP inbox receipt, Docker Compose startup, PostgreSQL, browser E2E, multi-worker concurrency and production readiness remain unverified. Audit and implementation records: `docs/PHASE_8_NOTIFICATIONS_AUDIT.md` and `docs/PHASE_8_NOTIFICATIONS.md`.

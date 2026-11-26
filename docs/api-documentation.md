@@ -6,7 +6,7 @@ Base path: `/api/v1`. Interactive OpenAPI: `/docs`. Protected API requests use `
 
 | Method/path | Access | Behavior |
 |---|---|---|
-| POST `/auth/register` | Public, throttled | Validates and creates creator/brand/customer account as unverified; returns 202 and does not issue a token. Email is attempted only through configured provider. |
+| POST `/auth/register` | Public, throttled | Validates and creates creator/brand/customer account as unverified; returns 202 and does not issue a token. Verification email is encrypted and queued for the separate worker when eligible. |
 | POST `/auth/login` | Public, throttled | Validates credentials/verification; returns short-lived `access_token` + user and sets refresh cookie (not in JSON). |
 | POST `/auth/refresh` | Refresh cookie + trusted origin, throttled | Rotates refresh credential, returns new access token and user. Invalid/replayed/expired sessions are rejected. |
 | POST `/auth/logout` | Access token + trusted origin | Revokes current session and clears refresh cookie (204). |
@@ -17,7 +17,7 @@ Base path: `/api/v1`. Interactive OpenAPI: `/docs`. Protected API requests use `
 | POST `/auth/password/reset/request` | Public, throttled | Non-enumerating reset request. |
 | POST `/auth/password/reset/confirm` | Public, throttled | Consumes one reset token, sets a new password and revokes all sessions. |
 
-Auth errors use stable HTTP statuses with safe detail; refresh/login are `no-store`. Rate-limit rejection returns 429. `Origin` checks apply to refresh/logout cookie operations. SMTP disabled responses explicitly say no email was sent. Configure SMTP; do not pass auth tokens in query strings (email templates use fragments).
+Auth errors use stable HTTP statuses with safe detail; refresh/login are `no-store`. Rate-limit rejection returns 429. `Origin` checks apply to refresh/logout cookie operations. Email requests queue encrypted outbox rows; email disabled responses explicitly say no message was sent. Configure SMTP and run the separate worker; do not pass auth tokens in query strings (email templates use fragments).
 
 ## Customer commerce endpoints
 
@@ -41,6 +41,19 @@ Auth errors use stable HTTP statuses with safe detail; refresh/login are `no-sto
 | GET `/r/{referral_code}` | Public | Preserves existing click tracking, validates active creator/campaign and sets a signed, HttpOnly, attribution-window cookie. The SPA `/r/{code}` landing route uses this API and navigates to the product/shop. Checkout accepts attribution from that cookie only, not a caller-supplied creator ID/code. |
 
 Cart persistence is **account-only**; there is no guest cart or merge. There are no saved-address book, shipping/tax calculation, coupon system, or provider callback. Shipping is currently zero/free. Demo payment is a no-money backend simulation and may cancel/release stock on simulated failure. COD remains unpaid through fulfillment until an admin records collection after delivery. Online is disabled; no real payment is collected. Demo rewards are marked non-payable and excluded from genuine revenue/payout eligibility. See [Payment options](PAYMENT_OPTIONS.md). Signed referral attribution remains subject to active creator/campaign and compatible products.
+
+## Notifications and delivery
+
+| Method/path | Access | Behavior |
+|---|---|---|
+| GET `/notifications?page=&page_size=&unread_only=` | Authenticated | Recipient-only paginated inbox; page size is capped at 100 and response includes total/unread counts. |
+| PATCH `/notifications/{id}/read` | Authenticated owner | Mark a current user's notification read; foreign/nonexistent IDs return 404. |
+| POST `/notifications/read-all` | Authenticated | Mark only this user's unread rows read. |
+| GET/PUT `/notifications/preferences` | Authenticated | Read/update global in-app/email defaults and per-category overrides (`order`, `campaign`, `application`, `reward`, `security`, `account`). Essential account action/security email may bypass email preferences. |
+| GET `/admin/notification-deliveries/summary` | Admin | Status totals, SMTP configuration state and unmeasured worker status; does not expose recipients or claim actual inbox delivery. |
+| GET `/admin/notification-deliveries?page=&page_size=&status=&category=` | Admin | Bounded, redacted delivery records with status/attempt/timestamps/static error code only. No address, message, ciphertext, token or provider response. |
+
+The SPA routes are `/notifications` and `/settings/notifications`; admins also get `/admin/notifications`. The delivery worker is a separate process (`python -m app.worker`) and uses the SQL outbox. `sent` means provider acceptance only; email disabled yields `suppressed`, and a missing worker leaves rows pending. See [Phase 8 operations and limits](PHASE_8_NOTIFICATIONS.md).
 
 ## Existing product endpoints
 

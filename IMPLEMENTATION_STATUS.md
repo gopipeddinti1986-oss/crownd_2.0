@@ -1,6 +1,6 @@
 # CROWND implementation status
 
-Updated: 2026-11-25, after Phase 7 platform administration implementation. Phases 1–7 implementation and local verification are recorded below; production readiness is not implied. This checklist is conservative: checked items are implemented and the indicated tests passed; not checked means incomplete or unverified. Detailed task/dependency plan: [`docs/DEVELOPMENT_ROADMAP.md`](docs/DEVELOPMENT_ROADMAP.md).
+Updated: 2026-11-25, after Phase 8 notification implementation and local verification. Phases 1–8 implementation and local verification are recorded below; production readiness is not implied. This checklist is conservative: checked items are implemented and the indicated tests passed; not checked means incomplete or unverified. Detailed task/dependency plan: [`docs/DEVELOPMENT_ROADMAP.md`](docs/DEVELOPMENT_ROADMAP.md).
 
 ## Verified audit baseline
 
@@ -83,7 +83,17 @@ Updated: 2026-11-25, after Phase 7 platform administration implementation. Phase
 - [x] Added dispute cases/events for order/conversion/reward investigations; dispute status changes preserve append-only financial history and never imply a refund or ledger mutation.
 - [x] Added append-only admin audit events and database/ORM update-delete guards for current and legacy audit logs; created admin operations overview, queue search, honest API/database/integration health labels, and responsive role-gated UI.
 - [x] Additive migration `0008_platform_admin`; fresh/historical SQLite upgrade, downgrade/re-upgrade and append-only trigger rejection tested. Backend **57 passed**; frontend **35 passed**, TypeScript, ESLint, Vite build and Python compileall passed.
-- [ ] PostgreSQL, browser E2E/accessibility, production operations, independent security review, external identity verification and notification/email/Redis delivery remain unverified or out of scope. No production-ready claim.
+- [ ] PostgreSQL, browser E2E/accessibility, production operations, independent security review, and external identity verification remain unverified or out of scope. No production-ready claim.
+
+### Phase 8 — Notifications, communication and workflow automation (implemented; local verification passed)
+
+- [x] Completed and documented the architecture/event audit before implementation; see [`docs/PHASE_8_NOTIFICATIONS_AUDIT.md`](docs/PHASE_8_NOTIFICATIONS_AUDIT.md).
+- [x] Added additive migration `0009_notifications` with per-user category preferences, recipient-scoped notifications, and encrypted email outbox; uniqueness constraints enforce recipient/event idempotency.
+- [x] Added bounded SQL polling worker (`python -m app.worker`), existing disabled/SMTP provider abstraction, encrypted outbox payloads (including one-use account links), safe retry/backoff, stale-claim recovery, static failure categories and honest provider-acceptance status. Business API requests never perform SMTP I/O.
+- [x] Integrated order create/cancel/status/COD collection, campaign application/review/moderation, reward creation/review/simulated payout, password-reset completion and account lifecycle notifications. Copy does not imply unsupported money movement or carrier tracking.
+- [x] Added recipient-only paginated list/read/read-all/preferences APIs, user inbox/settings/unread badge, admin-only redacted delivery summary/list and operations health labels. Outbox monitor never returns recipients, content, ciphertext, tokens or SMTP details.
+- [x] Compose includes a separate worker and local Mailpit. Architecture, event semantics, API, migration, settings, deployment and limitations are documented in [`docs/PHASE_8_NOTIFICATIONS.md`](docs/PHASE_8_NOTIFICATIONS.md).
+- [x] Local backend/frontend and migration verification results are recorded in the Phase 8 doc below; warnings/limitations include SQLite-only DB verification, no external SMTP receipt, unmeasured worker liveness, no browser E2E and no multi-worker/PostgreSQL concurrency test.
 
 ## In progress / partial
 
@@ -105,16 +115,24 @@ Updated: 2026-11-25, after Phase 7 platform administration implementation. Phase
 - [ ] Payment refund workflows, saved address book, shipping/tax quoting, automatic expiry of unpaid inventory reservations and full fulfillment operations.
 - [ ] Reward lifecycle worker and immutable balanced ledger, payout admin approval/reconciliation.
 - [ ] Complete creator/brand profiles, social evidence, portfolio uploads, brand verification, invitations/collaboration/deliverables.
-- [ ] Messaging, persisted notifications and production email preferences/delivery monitoring.
-- [x] Phase 7 adds backend-enforced admin lifecycle/restrictions, manual creator/brand verification, campaign moderation, explainable risk review, append-only audit history, dispute cases, operations dashboard/search and the admin UI. Admin bootstrap, notification delivery, external verification and production operations remain incomplete; Phase 3 order controls remain as previously described.
+- [ ] One-to-one conversations/collaboration messaging, external identity verification and user-facing support workflows.
+- [x] Phase 7 adds backend-enforced admin lifecycle/restrictions, manual creator/brand verification, campaign moderation, explainable risk review, append-only audit history, dispute cases, operations dashboard/search and the admin UI. Admin bootstrap, external verification and production operations remain incomplete; Phase 3 order controls remain as previously described.
+- [x] Phase 8 adds persisted recipient-scoped notifications, preferences, encrypted/retryable SQL email delivery, authenticated inbox/settings and admin delivery monitoring. Production SMTP, worker heartbeat, PostgreSQL/multi-worker concurrency and browser E2E remain unverified.
 - [ ] Redis included/managed for production deployment; production secret manager, TLS, backups, observability and hardened runtime.
 - [ ] Playwright end-to-end workflows, multi-worker/security/load testing, independent security review and CI release gates.
 
 ## Verification history
 
-The following sections preserve the Phase 1/2 records from their respective milestones. Current Phase 3 verification is listed first below.
+### Phase 8 verification (current working tree)
 
-### Phase 4 verification (current working tree)
+- Backend `backend/.venv/bin/pytest -q`: **66 passed**, one existing Starlette/httpx TestClient deprecation warning. `python -m compileall -q app tests` passed. New coverage includes recipient ownership/IDOR, pagination/read-all, preferences, event idempotency and business integration, one-use encrypted verification queue, provider-disabled suppression, retry/backoff/five-attempt maximum, redacted admin monitoring, and historical/fresh SQLite migration re-upgrade.
+- Frontend `npx tsc -b`, `npm run lint`, Vitest: **9 test files / 38 tests passed**, `npm run build` passed. Existing Recharts jsdom width/height warnings remain; Vite warns the minified main chunk is ~864.17 kB (>500 kB advisory).
+- `git diff --check` passed. Docker Compose could not be started/validated because Docker is not installed. SMTP is not configured in this environment; no real email/inbox receipt was tested. PostgreSQL migration/runtime/concurrency, browser E2E/accessibility, multi-worker load, production worker liveness and independent security review remain unverified.
+- No real payment, payout, refund, or carrier/shipping integration exists; notifications explicitly describe current Demo/COD/manual platform states only.
+
+The following sections preserve earlier Phase 1/2 records from their milestones. Current Phase 3 verification is listed below.
+
+### Phase 4 verification (previous milestone)
 
 - Backend `JWT_SECRET=test-secret-that-is-long-enough-for-testing ./.venv/bin/pytest -q`: **38 passed**, one existing Starlette/httpx deprecation warning. Python `compileall` passed. New coverage includes last-valid-referral persistence across direct navigation and checkout; mixed-cart attribution; creator/brand/admin filtered analytics; self-referral ineligibility/risk; COD confirmation only after collection; cancellation history; demo simulation; duplicate checkout/reward protection; ownership and privacy assertions.
 - Frontend `npx tsc -b`, `npm run lint`, Vitest: **24 passed**, and `npm run build` passed. Vite emitted a >500 kB advisory for the ~772 kB uncompressed main JS chunk. No dedicated browser E2E test was run.
