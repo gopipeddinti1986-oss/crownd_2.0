@@ -119,6 +119,8 @@ def test_campaign_management_lifecycle_and_brand_ownership(commerce_db,commerce_
     catalog_scope=commerce_client.put(f"/api/v1/campaigns/{campaign_id}",headers=data["brand"],json={"product_ids":[]})
     assert catalog_scope.status_code==200 and catalog_scope.json()["product_ids"]==[] and len(catalog_scope.json()["products"])==1
     rejected=commerce_client.patch(f"/api/v1/campaigns/{campaign_id}/status",headers=data["admin"],json={"status":"rejected"})
+    assert rejected.status_code==409
+    rejected=commerce_client.post(f"/api/v1/admin/campaigns/{campaign_id}/moderation",headers=data["admin"],json={"status":"rejected","reason":"Campaign violates published policy","confirmation":"REJECTED"})
     assert rejected.status_code==200 and rejected.json()["status"]=="rejected"
 
 

@@ -207,8 +207,9 @@ class CampaignProductsUpdate(BaseModel):
         return value
 
 class ReferralRiskReview(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
     status: str = Field(pattern=r"^(reviewed|dismissed)$")
+    reason: str = Field(min_length=10, max_length=500)
 
 class RewardRuleCreate(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")

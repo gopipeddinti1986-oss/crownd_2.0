@@ -162,7 +162,7 @@ def me(user: User=Depends(current_user),db: Session=Depends(get_db)):
     if user.role=="creator":
         row=db.scalar(select(CreatorProfile).where(CreatorProfile.user_id==user.id))
         if row:
-            profile={"username":row.username,"niche":row.niche,"location":row.location,"bio":row.bio,"platform":row.platform,"followers":row.followers,"engagement":row.engagement,"availability":row.availability,"crown_score":row.crown_score,"trust_score":row.trust_score}
+            profile={"username":row.username,"niche":row.niche,"location":row.location,"bio":row.bio,"platform":row.platform,"followers":row.followers,"engagement":row.engagement,"availability":row.availability,"crown_score":row.crown_score,"trust_score":row.trust_score,"verification":row.verification}
     elif user.role=="brand":
         row=db.scalar(select(BrandProfile).where(BrandProfile.user_id==user.id))
         if row:

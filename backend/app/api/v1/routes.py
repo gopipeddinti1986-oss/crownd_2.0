@@ -20,6 +20,7 @@ from app.api.v1.rewards import router as rewards_router
 from app.schemas.commerce import CampaignCreate, CampaignProductsUpdate, CampaignStatusUpdate, ProductCreate, ReferralLinkCreate, ReferralLinkUpdate, ReferralRiskReview
 from app.api.v1.campaigns import router as campaigns_router
 from app.api.v1.analytics import router as analytics_router
+from app.api.v1.admin import router as admin_router
 
 router = APIRouter()
 router.include_router(auth_router)
@@ -27,6 +28,7 @@ router.include_router(commerce_router)
 router.include_router(rewards_router)
 router.include_router(campaigns_router)
 router.include_router(analytics_router)
+router.include_router(admin_router)
 def slugify(s): return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-") + "-" + secrets.token_hex(3)
 def money(n): return Decimal(str(n)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 def audit(db, actor, action, kind, entity):
@@ -93,9 +95,10 @@ def change_campaign(campaign_id:int,body:CampaignStatusUpdate,db:Session=Depends
     c=db.get(Campaign,campaign_id)
     if not c: raise HTTPException(404,"Campaign not found")
     if user.role!="admin" and (user.role!="brand" or c.brand_id!=user.id): raise HTTPException(403,"Not your campaign")
+    if user.role=="admin": raise HTTPException(409,"Administrators must use the reasoned campaign moderation workflow")
     target=body.status
     allowed={"draft":{"published","cancelled"},"published":{"paused","completed","cancelled"},"paused":{"published","completed","cancelled"}}
-    if target not in allowed.get(c.status,set()) and not (user.role=="admin" and target=="rejected"): raise HTTPException(409,"Invalid campaign status transition")
+    if target not in allowed.get(c.status,set()): raise HTTPException(409,"Invalid campaign status transition")
     c.status=target; audit(db,user,"campaign.status_changed","campaign",c.id); db.commit(); return {"id":c.id,"status":c.status}
 
 @router.post("/campaigns/{campaign_id}/applications",status_code=201)
@@ -425,7 +428,9 @@ def admin_referral_risk(status:str="open",risk_code:str|None=None,creator_id:int
 def review_referral_risk(flag_id:int,body:ReferralRiskReview,db:Session=Depends(get_db),user:User=Depends(require_role("admin"))):
     risk=db.get(ReferralRiskFlag,flag_id)
     if not risk: raise HTTPException(404,"Risk flag not found")
+    previous=risk.status
     risk.status=body.status; risk.reviewed_by=user.id; risk.reviewed_at=datetime.now(timezone.utc)
+    db.add(AdminAuditEvent(actor_id=user.id,action=f"referral_risk.{body.status}",entity_type="referral_risk",entity_id=str(risk.id),reason=body.reason,metadata_json={"from_status":previous,"to_status":body.status},created_at=datetime.now(timezone.utc)))
     audit(db,user,f"referral_risk.{body.status}","referral_risk",risk.id); db.commit()
     return {"id":risk.id,"status":risk.status,"reviewed_at":risk.reviewed_at.isoformat()}
 
@@ -508,6 +513,3 @@ def analytics_timeseries(db:Session=Depends(get_db),user:User=Depends(current_us
 @router.get("/admin/audit-logs")
 def audit_logs(db:Session=Depends(get_db),user:User=Depends(require_role("admin"))):
     return [{"id":a.id,"actor_id":a.actor_id,"action":a.action,"entity_type":a.entity_type,"entity_id":a.entity_id,"created_at":a.created_at.isoformat()} for a in db.scalars(select(AuditLog).order_by(AuditLog.created_at.desc()).limit(200)).all()]
-@router.get("/admin/users")
-def admin_users(db:Session=Depends(get_db),user:User=Depends(require_role("admin"))):
-    return [{"id":u.id,"name":u.name,"email":u.email,"role":u.role,"active":u.is_active,"created_at":u.created_at.isoformat()} for u in db.scalars(select(User).order_by(User.created_at.desc()).limit(300)).all()]

@@ -51,6 +51,7 @@ class CreatorProfile(Base):
     availability: Mapped[bool] = mapped_column(Boolean, default=True)
     crown_score: Mapped[int] = mapped_column(Integer, default=500)
     trust_score: Mapped[int] = mapped_column(Integer, default=80)
+    verification: Mapped[str] = mapped_column(String(24), default="unverified", nullable=False)
 
 class BrandProfile(Base):
     __tablename__ = "brand_profiles"
@@ -426,3 +427,49 @@ class AuditLog(Base):
     entity_type: Mapped[str] = mapped_column(String(60))
     entity_id: Mapped[str] = mapped_column(String(80))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+class AdminAuditEvent(Base):
+    __tablename__ = "admin_audit_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    actor_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    action: Mapped[str] = mapped_column(String(100), index=True)
+    entity_type: Mapped[str] = mapped_column(String(60), index=True)
+    entity_id: Mapped[str] = mapped_column(String(80), index=True)
+    reason: Mapped[str] = mapped_column(String(500))
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+
+class AdminDispute(Base):
+    __tablename__ = "admin_disputes"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id", ondelete="RESTRICT"), nullable=True, index=True)
+    conversion_id: Mapped[int | None] = mapped_column(ForeignKey("conversions.id", ondelete="RESTRICT"), nullable=True, index=True)
+    reward_id: Mapped[int | None] = mapped_column(ForeignKey("rewards.id", ondelete="RESTRICT"), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="open", index=True)
+    summary: Mapped[str] = mapped_column(String(500))
+    opened_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    resolved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    __table_args__ = (CheckConstraint("status IN ('open','under_review','resolved')", name="ck_admin_dispute_status"),)
+
+class AdminDisputeEvent(Base):
+    __tablename__ = "admin_dispute_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    dispute_id: Mapped[int] = mapped_column(ForeignKey("admin_disputes.id", ondelete="RESTRICT"), index=True)
+    actor_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    event_type: Mapped[str] = mapped_column(String(32))
+    from_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    to_status: Mapped[str] = mapped_column(String(20))
+    reason: Mapped[str] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+def _deny_append_only_mutation(*_args):
+    raise ValueError("Administrative history is append-only.")
+
+event.listen(AuditLog, "before_update", _deny_append_only_mutation)
+event.listen(AuditLog, "before_delete", _deny_append_only_mutation)
+event.listen(AdminAuditEvent, "before_update", _deny_append_only_mutation)
+event.listen(AdminAuditEvent, "before_delete", _deny_append_only_mutation)
+event.listen(AdminDisputeEvent, "before_update", _deny_append_only_mutation)
+event.listen(AdminDisputeEvent, "before_delete", _deny_append_only_mutation)
