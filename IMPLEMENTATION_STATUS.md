@@ -1,10 +1,10 @@
 # CROWND implementation status
 
-Updated: 2026-11-25, after Phase 4 referral-attribution implementation and verification. Phase 4 is implemented on the current development branch; this does not imply production readiness. This checklist is conservative: checked items are implemented and the indicated tests passed; not checked means incomplete or unverified. Detailed task/dependency plan: [`docs/DEVELOPMENT_ROADMAP.md`](docs/DEVELOPMENT_ROADMAP.md).
+Updated: 2026-11-25, after Phase 6 campaign lifecycle and analytics implementation. Phase 6 implementation and local verification are recorded below; production readiness is not implied. This checklist is conservative: checked items are implemented and the indicated tests passed; not checked means incomplete or unverified. Detailed task/dependency plan: [`docs/DEVELOPMENT_ROADMAP.md`](docs/DEVELOPMENT_ROADMAP.md).
 
 ## Verified audit baseline
 
-- Existing branch began clean at commit `75601c8` on `arena/e6c9b4f7-crownd-2-0`; remote is the requested GitHub repository. Existing Vite preview/API were running and UI, API health and campaigns returned 200 before changes.
+- Phase 6 work began on the clean `arena/e6c9b4f7-crownd-2-0` branch at `5719030`; the Phase 6 audit is committed as `53ff852`. Remote is the requested GitHub repository. Local audit notes are in [`docs/PHASE_6_ANALYTICS_AUDIT.md`](docs/PHASE_6_ANALYTICS_AUDIT.md).
 - Baseline: backend pytest **4 passed**; frontend lint clean, Vitest **3 passed**, TypeScript/Vite production build passed (existing >500 kB JS warning).
 - Audit confirmed localStorage bearer token storage, no refresh/revocation, immediate login before email verification, custom PBKDF2 password hashes, no auth rate limits/password reset/verification, generic input dictionaries, app-import `create_all`, incomplete business workflows and a dev-only simulator. Expanded findings are in the roadmap.
 
@@ -64,6 +64,16 @@ Updated: 2026-11-25, after Phase 4 referral-attribution implementation and verif
 - [x] Verified backend **38 passed**, Python compileall; frontend **24 passed**, TypeScript, lint and production build; SQLite fresh upgrade/downgrade/re-upgrade to `0005_referral_attribution`; secret-pattern scan and `git diff --check`.
 - [ ] PostgreSQL migration/concurrency, browser E2E, external refund/payment workflow, and privacy/legal retention review remain unverified or out of scope.
 
+### Phase 6 — Campaign management and analytics (implemented; local verification passed)
+
+- [x] Completed the repository audit before implementation; `docs/PHASE_6_ANALYTICS_AUDIT.md` was committed in `53ff852`.
+- [x] Added brand-owned campaign listing/detail/update, lifecycle operations, structured objectives/audience/requirements, public/unlisted visibility, performance goals, product selection and brand/admin access controls.
+- [x] Added database-derived brand overview, campaign detail, creator/product comparison and administrator aggregate analytics, UTC date filters, bounded campaign windows, product filters, time-series/funnel, deterministic insights and formula-safe CSV exports.
+- [x] Separates confirmed paid non-demo order-item revenue, unpaid pending/COD, cancelled/reversed, demo/simulated value and reward lifecycle states; does not treat campaign budget as spend. ROI and cost-per-conversion remain unavailable without actual cost records.
+- [x] Analytics responses and exports omit customer PII and visitor hashes; server-side brand ownership and role checks are tested.
+- [x] Final local verification: backend **53 passed**; frontend **32 passed**, lint and production build passed; compileall, SQLite fresh/historical migration paths, and `git diff --check` passed. One upstream Starlette/httpx deprecation warning; Vite notes a ~835 kB minified chunk, and Recharts warns about zero-size jsdom containers.
+- [ ] PostgreSQL migration and production query behavior, browser E2E, real payment/refund behavior, external financial settlement and legal/privacy review are not verified. See [`docs/PHASE_6_ANALYTICS.md`](docs/PHASE_6_ANALYTICS.md) for definitions and limitations.
+
 ## In progress / partial
 
 - [ ] Auth is significantly safer but not independently security-audited. Rate limit is IP-based; no MFA, persistent login-failure scoring, account lockout, device/session listing, signed email provider callbacks, or session-management UI.
@@ -75,7 +85,7 @@ Updated: 2026-11-25, after Phase 4 referral-attribution implementation and verif
 - [ ] Phase 3 has no gateway/real online transaction, refund workflow, shipping/tax quote, address book, or unpaid-order expiry.
 - [ ] SQLite lifecycle/security behavior is tested; multi-process/PostgreSQL concurrency/load stress remains unverified.
 - [ ] Scheduled reward eligibility, refund reversal, balanced-ledger reconciliation and payout settlement remain absent.
-- [ ] Dashboards have basic aggregate queries; full filters, role customer workflows and transactional analytics are absent. Sample discovery fallback demo campaign cards remain labeled `DEMO`.
+- [ ] Phase 6 brand/admin reporting is database-derived and date-filtered, but is not a transactional financial ledger; production PostgreSQL/load and browser E2E checks remain. Sample discovery fallback demo campaign cards remain labeled `DEMO`.
 
 ## Not started
 

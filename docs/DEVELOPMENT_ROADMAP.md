@@ -95,7 +95,21 @@ Audit baseline and sequence: [`docs/REFERRAL_ATTRIBUTION_AUDIT.md`](REFERRAL_ATT
 | Campaign CRUD/discovery/invites | Phase 2 policy | campaign routes/services/UI | Edit/draft/publish/pause and filters have real persistence; brand can invite; creator requirements enforced. | Lifecycle, filtering, RBAC tests. |
 | Collaboration and deliverables | Campaign/application workflow | collaboration models/routes/UI/migration | Acceptance creates collaboration; deliverables revisions and approval are auditable and authorized. | Complete creator/brand workflow API and UI tests. |
 
-## Phase 6 — Genuine payment integration (deferred; outside Phase 3 scope)
+## Phase 6 — Campaign lifecycle and trusted analytics (implemented locally; not a production-readiness claim)
+
+Implementation record and metric definitions: [`docs/PHASE_6_ANALYTICS.md`](PHASE_6_ANALYTICS.md). The prior roadmap's genuine-payment Phase 6 is retained as a separate deferred workstream below; it was not a provider-integration deliverable.
+
+| Milestone | Implementation | Acceptance / verification |
+|---|---|---|
+| 6.1 Campaign lifecycle | Brand-scoped list/detail/update, status transitions, structured campaign configuration, visibility and product scope; current models/services reused. | Brand ownership, product ownership, lifecycle, visibility and invalid date/configuration tests. |
+| 6.2 Trusted analytics | Server-side UTC date windows and campaign/date/product scoping; existing order items, conversion/payment lifecycle, click/activity records and reward ledger only. | Decimal financial aggregation; no clicks-as-conversions, demo-as-revenue, unpaid COD-as-confirmed revenue or budget-as-spend. Mixed-cart item-level attribution regression test. |
+| 6.3 Brand/admin reports | Brand overview, campaign, creator and product rollups; admin aggregate filters; rule-based observations and safe CSV outputs. | Role/ownership isolation and customer-PII exclusion; formula-injection escaping. Custom window capped at ten years. |
+| 6.4 User experience | Brand campaign manager, analytics overview, campaign report, admin aggregates, date/product filters, empty/error/loading states. | Component coverage; API remains authoritative for filters and financial values. |
+| 6.5 Migration/docs/checks | Additive `0007_campaign_intelligence` after `0006_rewards_ledger`; audit, implementation status, roadmap and metric definition docs. | SQLite fresh/existing upgrade tested. Downgrade intentionally retains fields to avoid destructive data loss; PostgreSQL remains unverified. |
+
+Known scope boundaries: ROI/cost-per-conversion are unavailable without actual campaign-spend records; reward efficiency is not ROI. PostgreSQL, production load, browser E2E, payment/refund settlement and financial/legal review remain follow-ups. See the Phase 6 implementation record for exact commands/results and date attribution behavior.
+
+## Deferred workstream — Genuine payment integration (separate from analytics Phase 6; outside Phase 3 scope)
 
 | Task | Dependencies | Files/modules | Acceptance criteria | Testing |
 |---|---|---|---|---|
@@ -114,7 +128,7 @@ Audit baseline and sequence: [`docs/REFERRAL_ATTRIBUTION_AUDIT.md`](REFERRAL_ATT
 
 | Task | Dependencies | Files/modules | Acceptance criteria | Testing |
 |---|---|---|---|---|
-| Analytics | Verified order/reward data | analytics services/routes/charts | Database-derived aggregates, date filters, efficient paging and truly empty states. | Query scope, aggregation and date-boundary tests. |
+| Analytics (Phase 6 first release implemented) | Verified order/reward data | `app/services/analytics.py`, `app/api/v1/analytics.py`, `app/api/v1/campaigns.py`, `CampaignIntelligence.tsx` | Database-derived aggregates, UTC date/product filters, campaign/creator/product tables, honest empty states and safe exports. Remaining: PostgreSQL query-plan/load verification and production browser E2E. | SQLite aggregation/ownership/privacy/CSV tests and frontend component tests; see `docs/PHASE_6_ANALYTICS.md`. |
 | Creator scores and risk review | Verified events | scoring/risk models/services/admin UI | Configurable explainable formula and review workflow; no unsupported fraud claims. | Deterministic component weights and review authorization tests. |
 | Creator matching | Profiles/campaign filters | matching service/routes/UI | Weighted explainable recommendations use available verified/self-entered data and expose reasons/limits. | Ranking, missing-data and access tests. |
 
@@ -139,3 +153,4 @@ Audit baseline and sequence: [`docs/REFERRAL_ATTRIBUTION_AUDIT.md`](REFERRAL_ATT
 - **Phase 2 customer commerce:** implemented and pushed in `f40dae1`; additive migration `0003_customer_commerce`, API-backed catalog, persistent customer cart, idempotent checkout, conditional inventory handling, ownership-scoped orders, signed referral continuity and responsive shop UI.
 - **Phase 3 payment options/order lifecycle:** implemented in the current milestone; migration `0004_payment_options`, backend-only no-money Demo Payment, COD unpaid/fulfillment/administrator collection, disabled Online Payment, payment-attempt history, admin order management, audit records, demo-reward non-payability and removal of legacy guest simulator. See `docs/PAYMENT_OPTIONS.md` and `IMPLEMENTATION_STATUS.md` for verified test results and limitations.
 - **Phase 4 (implemented on the current development branch; verified in SQLite/local test environments):** referral attribution and conversion tracking. Reuses existing Referral/Application and commerce/payment records; attribution rules and verification evidence are in `docs/referral-attribution.md`, `docs/REFERRAL_ATTRIBUTION_AUDIT.md`, and `IMPLEMENTATION_STATUS.md`. PostgreSQL migration/concurrency, browser E2E, privacy/legal review, and paid-order refund workflow remain release follow-ups. No production-ready claim is made.
+- **Phase 6 (implemented on the current branch; local verification passed):** campaign management and trusted brand/admin analytics. Backend 53 tests and frontend 32 tests pass; lint/build, SQLite migration coverage, compileall and diff checks passed. Audit, definitions, results and limitations are recorded in `docs/PHASE_6_ANALYTICS_AUDIT.md` and `docs/PHASE_6_ANALYTICS.md`. PostgreSQL and browser E2E remain unverified.
