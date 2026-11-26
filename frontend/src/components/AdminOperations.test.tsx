@@ -11,7 +11,7 @@ vi.mock('../services/api',()=>({api:apiMock}));
 const notify=vi.fn();
 function mount(node:ReactNode){const client=new QueryClient({defaultOptions:{queries:{retry:false}}});return render(<QueryClientProvider client={client}>{node}</QueryClientProvider>);}
 beforeEach(()=>{vi.clearAllMocks();apiMock.get.mockImplementation(async(path:string)=>{
- if(path==='/admin/operations')return {data:{service:{api_liveness:'available',database_query:'available'},integrations:{email_delivery:'not_probed'},queues:{active_users:3,open_risk_flags:1,open_disputes:0,unverified_creators:1,unverified_brands:0,campaigns_needing_moderation:2},notifications:{delivery:'unavailable'}}};
+ if(path==='/admin/operations')return {data:{service:{api_liveness:'available',database_query:'available'},integrations:{email_delivery:'not_probed'},queues:{active_users:3,open_risk_flags:1,open_disputes:0,unverified_creators:1,unverified_brands:0,campaigns_needing_moderation:2},notifications:{delivery:'sql_outbox_available',provider:'disabled_or_incomplete',worker_status:'not_measured',pending:0}}};
  if(path==='/admin/users')return {data:{items:[{id:9,name:'Test Creator',email_masked:'t***@example.test',role:'creator',active:true,email_verified:true,verification:'unverified'}],total:1}};
  if(path==='/admin/campaigns')return {data:{items:[],total:0}};
  if(path==='/admin/disputes')return {data:{items:[],total:0}};
@@ -21,12 +21,13 @@ beforeEach(()=>{vi.clearAllMocks();apiMock.get.mockImplementation(async(path:str
 afterEach(()=>cleanup());
 
 describe('Phase 7 platform administration UI',()=>{
- it('labels the API/database probe and unavailable notifications accurately',async()=>{
+ it('labels the API/database probe and notification worker status accurately',async()=>{
   mount(<AdminOperations notify={notify}/>);
   expect(await screen.findByText('Administration')).toBeTruthy();
   expect(screen.getByText('API liveness')).toBeTruthy();
   await screen.findAllByText('available');
-  expect(screen.getByText('No persisted delivery system configured')).toBeTruthy();
+  expect(screen.getByText('sql_outbox_available')).toBeTruthy();
+  expect(screen.getByText(/worker: not_measured/)).toBeTruthy();
   expect(screen.getByText('email delivery')).toBeTruthy();
   expect(screen.getByText('not_probed')).toBeTruthy();
  });
