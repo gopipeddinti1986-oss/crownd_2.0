@@ -98,7 +98,7 @@ export async function getAdminReferralLinks(params:Record<string,string|number|b
 export async function setAdminReferralLinkActive(id:number,active:boolean){const {data}=await api.patch(`/admin/referrals/links/${id}`,{active});return data;}
 export async function getAdminReferralConversions(params:Record<string,string|number|undefined>={}){const {data}=await api.get('/admin/conversions',{params});return data as {items:ReferralConversion[];total:number;page:number;pages:number};}
 export async function getAdminReferralRisk(params:Record<string,string|number|undefined>={}){const {data}=await api.get('/admin/referral-risk',{params});return data as {items:Array<{id:number;risk_code:string;referral_id:number|null;conversion_id:number|null;details:string;status:string;created_at:string}>;total:number;page:number;pages:number};}
-export async function reviewReferralRisk(id:number,status:'reviewed'|'dismissed'){const {data}=await api.patch(`/admin/referral-risk/${id}`,{status});return data;}
+export async function reviewReferralRisk(id:number,status:'reviewed'|'dismissed',reason:string){const {data}=await api.patch(`/admin/referral-risk/${id}`,{status,reason});return data;}
 export async function getAdminOrders(params:Record<string,string|number|undefined>={}){const {data}=await api.get('/admin/orders',{params});return data as {items:CommerceOrder[];total:number;page:number;pages:number};}
 export async function getAdminOrder(orderId:string){const {data}=await api.get(`/admin/orders/${encodeURIComponent(orderId)}`);return data as CommerceOrder;}
 export async function collectCodPayment(orderId:string){const {data}=await api.post(`/admin/orders/${encodeURIComponent(orderId)}/collect-payment`);return data as CommerceOrder;}
