@@ -123,7 +123,14 @@ def search_users(q: str | None = Query(None, max_length=100), role: str | None =
 
 @router.post("/admin/users/{user_id}/lifecycle")
 def change_user_lifecycle(user_id: int, body: LifecycleAction, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
-    target = db.scalar(select(User).where(User.id == user_id).with_for_update())
+    target_role = db.scalar(select(User.role).where(User.id == user_id))
+    if target_role is None: raise HTTPException(404, "User not found")
+    if target_role == "admin" and not body.active:
+        # Lock the admin cohort in stable order before checking the last-admin
+        # invariant. Locking only the target allows two admins to suspend each
+        # other concurrently on PostgreSQL.
+        db.scalars(select(User.id).where(User.role == "admin").order_by(User.id).with_for_update()).all()
+    target = db.scalar(select(User).where(User.id == user_id).with_for_update().execution_options(populate_existing=True))
     if not target: raise HTTPException(404, "User not found")
     expected = "REACTIVATE" if body.active else "SUSPEND"
     if body.confirmation != expected: raise HTTPException(422, f"Type {expected} to confirm this action")

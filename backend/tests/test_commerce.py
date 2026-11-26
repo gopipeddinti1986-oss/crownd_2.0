@@ -226,6 +226,39 @@ def test_product_stock_bounds_and_order_lifecycle_owner(commerce_db, commerce_cl
     assert commerce_client.post(f"/api/v1/orders/{order['id']}/cancel", headers=customer_headers).status_code == 409
 
 
+def test_suspended_brand_content_is_hidden_and_cannot_be_purchased(commerce_db, commerce_client):
+    brand_id, brand = create_account(commerce_db, "Suspended Seller", "suspended-seller@example.com", "brand")
+    _customer_id, customer = create_account(commerce_db, "Buyer", "suspended-buyer@example.com", "customer")
+    _admin_id, admin = create_account(commerce_db, "Admin", "suspended-admin@example.com", "admin")
+    _creator_id, creator = create_account(commerce_db, "Creator", "suspended-creator@example.com", "creator")
+    product_id = create_product(commerce_db, brand_id, stock=3)
+    campaign = commerce_client.post("/api/v1/campaigns", headers=brand, json={"title": "Seller campaign", "product_id": product_id})
+    assert campaign.status_code == 201
+    campaign_id = campaign.json()["id"]
+    assert commerce_client.patch(f"/api/v1/campaigns/{campaign_id}/status", headers=brand, json={"status": "published"}).status_code == 200
+    assert add_to_cart(commerce_client, customer, product_id).status_code == 201
+    suspended = commerce_client.post(f"/api/v1/admin/users/{brand_id}/lifecycle", headers=admin,
+        json={"active": False, "reason": "Suspend seller pending platform review", "confirmation": "SUSPEND"})
+    assert suspended.status_code == 200
+    assert commerce_client.get(f"/api/v1/products/{product_id}").status_code == 404
+    assert all(row["id"] != product_id for row in commerce_client.get("/api/v1/products").json()["items"])
+    assert commerce_client.get("/api/v1/products/categories").json() == []
+    assert all(row["id"] != brand_id for row in commerce_client.get("/api/v1/products/brands").json())
+    assert all(row["id"] != campaign_id for row in commerce_client.get("/api/v1/campaigns").json())
+    assert commerce_client.get(f"/api/v1/campaigns/{campaign_id}").status_code == 404
+    assert commerce_client.post(f"/api/v1/campaigns/{campaign_id}/applications", headers=creator, json={}).status_code == 404
+    cart = commerce_client.get("/api/v1/cart", headers=customer).json()
+    assert cart["unavailable_count"] == 1 and cart["items"][0]["available"] is False
+    assert commerce_client.patch(f"/api/v1/cart/items/{cart['items'][0]['id']}", headers=customer, json={"quantity": 1}).status_code == 409
+    assert commerce_client.post("/api/v1/checkout", headers={**customer, "Idempotency-Key": "suspended-seller-checkout"},
+        json={**address(), "payment_method": "cod"}).status_code == 409
+    assert commerce_client.delete("/api/v1/cart", headers=customer).status_code == 204
+    assert add_to_cart(commerce_client, customer, product_id).status_code == 404
+    with commerce_db() as db:
+        assert db.get(Product, product_id).stock == 3
+        assert db.scalar(select(func.count(Order.id))) == 0
+
+
 def test_demo_payment_is_backend_simulated_idempotent_and_identified(commerce_db, commerce_client):
     brand, _ = create_account(commerce_db, "Noya", "brand@example.com", "brand")
     _customer_id, customer = create_account(commerce_db, "Customer", "customer@example.com", "customer")
@@ -441,8 +474,9 @@ def test_phase5_reward_rule_precedence_demo_disclosure_and_role_scoped_apis(comm
 
 
 def test_phase5_mixed_cart_creates_idempotent_item_attributed_rewards_for_multiple_creators(commerce_db, commerce_client):
-    brand_a,_=create_account(commerce_db,"Brand A","phase5-mixed-brand-a@example.com","brand")
-    brand_b,_=create_account(commerce_db,"Brand B","phase5-mixed-brand-b@example.com","brand")
+    brand_a,brand_a_headers=create_account(commerce_db,"Brand A","phase5-mixed-brand-a@example.com","brand")
+    brand_b,brand_b_headers=create_account(commerce_db,"Brand B","phase5-mixed-brand-b@example.com","brand")
+    _brand_c,brand_c_headers=create_account(commerce_db,"Brand C","phase5-mixed-brand-c@example.com","brand")
     creator_a,creator_headers_a=create_account(commerce_db,"Creator A","phase5-mixed-creator-a@example.com","creator")
     creator_b,creator_headers_b=create_account(commerce_db,"Creator B","phase5-mixed-creator-b@example.com","creator")
     customer_id,customer=create_account(commerce_db,"Mixed Cart Customer","phase5-mixed-customer@example.com","customer")
@@ -461,6 +495,10 @@ def test_phase5_mixed_cart_creates_idempotent_item_attributed_rewards_for_multip
     assert add_to_cart(commerce_client,customer,product_b).status_code==201
     order_response=commerce_client.post("/api/v1/checkout",headers={**customer,"Idempotency-Key":"phase5-multi-creator-cart"},json={**address(),"payment_method":"cod"})
     assert order_response.status_code==201
+    # Each brand participating in a mixed-brand cart must see its own order line.
+    assert commerce_client.get("/api/v1/orders",headers=brand_a_headers).json()[0]["id"]==order_response.json()["id"]
+    assert commerce_client.get("/api/v1/orders",headers=brand_b_headers).json()[0]["id"]==order_response.json()["id"]
+    assert commerce_client.get("/api/v1/orders",headers=brand_c_headers).json()==[]
     with commerce_db() as db:
         order_before_collection=db.scalar(select(Order).where(Order.customer_id==customer_id))
         assert db.scalar(select(Reward.id).where(Reward.order_id==order_before_collection.id)) is None

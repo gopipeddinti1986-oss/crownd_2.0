@@ -1,5 +1,7 @@
 """Database-isolated API and auth regression tests."""
 from datetime import timedelta, timezone, datetime
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 import hashlib
 import os
 from decimal import Decimal
@@ -18,6 +20,7 @@ from app.database import Base, get_db
 from app.main import app
 from app.models.entities import AuthActionToken, AuthSession, User
 from app.security import ALGORITHM, hash_password
+from app.services.auth import create_session
 from app.services.rewards import calculate_reward
 
 @pytest.fixture
@@ -274,3 +277,38 @@ def test_campaign_duplicate_application_prevented(client,emails):
     client.patch(f"/api/v1/campaigns/{campaign['id']}/status",headers=brand,json={"status":"published"})
     assert client.post(f"/api/v1/campaigns/{campaign['id']}/applications",headers=creator,json={}).status_code==201
     assert client.post(f"/api/v1/campaigns/{campaign['id']}/applications",headers=creator,json={}).status_code==409
+
+
+def test_concurrent_refresh_requests_cannot_both_rotate_the_same_secret(tmp_path, monkeypatch):
+    engine=create_engine(f"sqlite:///{tmp_path/'refresh-race.db'}",connect_args={"check_same_thread":False,"timeout":15})
+    Base.metadata.create_all(engine)
+    factory=sessionmaker(bind=engine,autoflush=False,expire_on_commit=False)
+    def override_db():
+        db=factory()
+        try: yield db
+        finally: db.close()
+    app.dependency_overrides[get_db]=override_db
+    limiter.reset()
+    with factory() as db:
+        user=User(name="Race User",email="refresh-race@example.test",role="customer",
+            password_hash=hash_password("unused-test-password"),email_verified=True,is_active=True)
+        db.add(user);db.flush()
+        session,raw=create_session(db,user);db.commit();session_id=session.id
+    original=auth_routes.verify_refresh_secret
+    gate=Barrier(2)
+    def synchronized_verify(value):
+        result=original(value)
+        if result: gate.wait(timeout=8)
+        return result
+    monkeypatch.setattr(auth_routes,"verify_refresh_secret",synchronized_verify)
+    try:
+        with TestClient(app) as test_client:
+            def refresh():
+                return test_client.post("/api/v1/auth/refresh",headers={"Cookie":f"crownd_refresh={raw}"})
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                responses=[future.result(timeout=20) for future in [pool.submit(refresh),pool.submit(refresh)]]
+        assert sorted(response.status_code for response in responses)==[200,401]
+        with factory() as db:
+            assert db.get(AuthSession,session_id).revoked_at is not None
+    finally:
+        app.dependency_overrides.clear();limiter.reset();engine.dispose()

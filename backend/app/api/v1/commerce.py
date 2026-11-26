@@ -79,7 +79,8 @@ def _cart_payload(db: Session, cart: Cart, request: Request) -> dict:
     for row, product in rows:
         unit = _unit_price(product)
         line = _money(unit * row.quantity)
-        available = product.status == "active" and product.stock >= row.quantity
+        seller = db.get(User, product.brand_id)
+        available = product.status == "active" and product.stock >= row.quantity and bool(seller and seller.role == "brand" and seller.is_active)
         subtotal += line
         invalid_items += int(not available)
         items.append({"id": row.id, "product": _product_payload(db, product), "quantity": row.quantity, "unit_price": str(unit), "line_total": str(line), "available": available})
@@ -158,19 +159,21 @@ def _can_view_order(db: Session, order: Order, user: User) -> bool:
 
 @router.get("/products/categories")
 def product_categories(db: Session = Depends(get_db)):
-    return db.scalars(select(Product.category).where(Product.status == "active").distinct().order_by(Product.category)).all()
+    return db.scalars(select(Product.category).join(User, User.id == Product.brand_id).where(
+        Product.status == "active", User.role == "brand", User.is_active.is_(True)
+    ).distinct().order_by(Product.category)).all()
 
 
 @router.get("/products/brands")
 def product_brands(db: Session = Depends(get_db)):
-    rows = db.execute(select(User.id, func.coalesce(BrandProfile.name, User.name)).join(Product, Product.brand_id == User.id).outerjoin(BrandProfile, BrandProfile.user_id == User.id).where(Product.status == "active", User.is_active.is_(True)).distinct().order_by(func.coalesce(BrandProfile.name, User.name))).all()
+    rows = db.execute(select(User.id, func.coalesce(BrandProfile.name, User.name)).join(Product, Product.brand_id == User.id).outerjoin(BrandProfile, BrandProfile.user_id == User.id).where(Product.status == "active", User.role == "brand", User.is_active.is_(True)).distinct().order_by(func.coalesce(BrandProfile.name, User.name))).all()
     return [{"id": user_id, "name": name} for user_id, name in rows]
 
 
 @router.get("/products")
 def product_discovery(q: str | None = Query(default=None, max_length=120), category: str | None = Query(default=None, max_length=80), brand_id: int | None = Query(default=None, gt=0), min_price: Decimal | None = Query(default=None, ge=0), max_price: Decimal | None = Query(default=None, ge=0), in_stock: bool | None = None, campaign_id: int | None = Query(default=None, gt=0), sort: str = Query(default="newest", pattern="^(newest|price_asc|price_desc|name)$"), page: int = Query(default=1, ge=1), page_size: int = Query(default=12, ge=1, le=60), db: Session = Depends(get_db)):
     effective = func.coalesce(Product.sale_price, Product.price)
-    stmt = select(Product).join(User, User.id == Product.brand_id).where(Product.status == "active", User.is_active.is_(True))
+    stmt = select(Product).join(User, User.id == Product.brand_id).where(Product.status == "active", User.role == "brand", User.is_active.is_(True))
     if campaign_id is not None:
         campaign = db.get(Campaign, campaign_id)
         if not campaign or not campaign_is_active(campaign):
@@ -202,7 +205,7 @@ def product_discovery(q: str | None = Query(default=None, max_length=120), categ
 def product_detail(product_id: int, request: Request, db: Session = Depends(get_db)):
     product = db.get(Product, product_id)
     brand = db.get(User, product.brand_id) if product else None
-    if not product or product.status != "active" or not brand or not brand.is_active:
+    if not product or product.status != "active" or not brand or brand.role != "brand" or not brand.is_active:
         raise HTTPException(status_code=404, detail="Product not found")
     payload = _product_payload(db, product)
     campaign = next((candidate for candidate in db.scalars(select(Campaign).where(Campaign.brand_id == product.brand_id, Campaign.status == "published").order_by(Campaign.created_at.desc())).all() if campaign_is_active(candidate) and product.id in eligible_product_ids(db, candidate)), None)
@@ -232,7 +235,8 @@ def get_cart(request: Request, db: Session = Depends(get_db), user: User = Depen
 @limiter.limit("30/minute")
 def add_cart_item(body: CartItemRequest, request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(current_user)):
     product = db.get(Product, body.product_id)
-    if not product or product.status != "active":
+    seller = db.get(User, product.brand_id) if product else None
+    if not product or product.status != "active" or not seller or seller.role != "brand" or not seller.is_active:
         raise HTTPException(status_code=404, detail="Product is unavailable")
     cart = _cart_for(db, user)
     item = db.scalar(select(CartItem).where(CartItem.cart_id == cart.id, CartItem.product_id == product.id).with_for_update())
@@ -263,7 +267,8 @@ def update_cart_item(item_id: int, body: CartQuantityRequest, request: Request, 
     if not item:
         raise HTTPException(status_code=404, detail="Cart item not found")
     product = db.get(Product, item.product_id)
-    if not product or product.status != "active":
+    seller = db.get(User, product.brand_id) if product else None
+    if not product or product.status != "active" or not seller or seller.role != "brand" or not seller.is_active:
         raise HTTPException(status_code=409, detail="This product is no longer available")
     if body.quantity > product.stock:
         raise HTTPException(status_code=409, detail=f"Only {product.stock} item(s) are currently available")
@@ -311,8 +316,9 @@ def checkout(body: CheckoutRequest, request: Request, response: Response, idempo
     products = [product for _, product, _ in rows]
     subtotal = Decimal("0.00")
     for item, product, _brand in rows:
-        if product.status != "active" or item.quantity > product.stock:
-            raise HTTPException(status_code=409, detail=f"{product.name} no longer has enough inventory")
+        seller = db.get(User, product.brand_id)
+        if product.status != "active" or not seller or seller.role != "brand" or not seller.is_active or item.quantity > product.stock:
+            raise HTTPException(status_code=409, detail=f"{product.name} is no longer available in the required quantity")
         subtotal += _money(_unit_price(product) * item.quantity)
     subtotal = _money(subtotal)
     referral = _get_attribution(request, db)
@@ -329,7 +335,8 @@ def checkout(body: CheckoutRequest, request: Request, response: Response, idempo
     self_referral_seen = False
     selected_line_refs: list[Referral] = []
     for item, product, profile in rows:
-        changed = db.execute(update(Product).where(Product.id == product.id, Product.status == "active", Product.stock >= item.quantity).values(stock=Product.stock - item.quantity).execution_options(synchronize_session=False))
+        active_brand_ids = select(User.id).where(User.role == "brand", User.is_active.is_(True))
+        changed = db.execute(update(Product).where(Product.id == product.id, Product.status == "active", Product.brand_id.in_(active_brand_ids), Product.stock >= item.quantity).values(stock=Product.stock - item.quantity).execution_options(synchronize_session=False))
         if changed.rowcount != 1:
             db.rollback()
             raise HTTPException(status_code=409, detail=f"{product.name} sold out during checkout. Review your cart.")
@@ -419,7 +426,11 @@ def list_orders(db: Session = Depends(get_db), user: User = Depends(current_user
     elif user.role == "admin":
         stmt = select(Order)
     elif user.role == "brand":
-        stmt = select(Order).join(Product, Product.id == Order.product_id).where(Product.brand_id == user.id)
+        owned_products = select(Product.id).where(Product.brand_id == user.id)
+        brand_order_lines = select(OrderItem.order_id).join(Product, Product.id == OrderItem.product_id).where(Product.brand_id == user.id)
+        # Mixed carts store only the first product on the legacy Order row; use line
+        # snapshots as the source of truth while retaining support for pre-snapshot rows.
+        stmt = select(Order).where(or_(Order.product_id.in_(owned_products), Order.id.in_(brand_order_lines)))
     elif user.role == "creator":
         stmt = select(Order).join(Referral, Referral.id == Order.referral_id).where(Referral.creator_id == user.id)
     else:

@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 import hmac
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import select, update
@@ -38,6 +38,16 @@ def _attempt_email(db: Session,user: User,purpose: str,token: str) -> None:
     # Queue inside the action-token transaction. The outbox encrypts the one-use link at rest;
     # the SMTP provider runs only in the separate worker process.
     enqueue_action_email(db,user,purpose,token,settings.frontend_base_url)
+
+def _record_refresh_reuse(db: Session, session: AuthSession, now: datetime) -> None:
+    session.revoked_at=now
+    account=db.get(User,session.user_id)
+    if account:
+        notice="A refresh token was reused, so CROWND revoked that session. Sign in again and reset your password if you do not recognize this activity."
+        create_notification(db,recipient_id=account.id,event_key=f"session-reuse:{session.id}",category="security",
+            title="Session security alert",body=notice,action_path="/settings/notifications",
+            email_subject="CROWND session security alert",email_body=notice,essential_email=True)
+    db.commit()
 
 @router.post("/register",status_code=202)
 @limiter.limit("10/minute")
@@ -97,15 +107,9 @@ def refresh(request: Request,response: Response,db: Session=Depends(get_db)):
     if not session or session.revoked_at is not None or _aware(session.expires_at)<=now:
         _clear_refresh_cookie(response)
         raise HTTPException(status_code=401,detail="Refresh session is invalid or expired")
-    if not hmac.compare_digest(session.refresh_token_hash,_digest(raw)):
-        session.revoked_at=now
-        account=db.get(User,session.user_id)
-        if account:
-            notice="A refresh token was reused, so CROWND revoked that session. Sign in again and reset your password if you do not recognize this activity."
-            create_notification(db,recipient_id=account.id,event_key=f"session-reuse:{session.id}",category="security",
-                title="Session security alert",body=notice,action_path="/settings/notifications",
-                email_subject="CROWND session security alert",email_body=notice,essential_email=True)
-        db.commit()
+    presented_digest=_digest(raw)
+    if not hmac.compare_digest(session.refresh_token_hash,presented_digest):
+        _record_refresh_reuse(db,session,now)
         _clear_refresh_cookie(response)
         raise HTTPException(status_code=401,detail="Refresh token reuse detected; sign in again")
     user=db.get(User,session.user_id)
@@ -115,8 +119,22 @@ def refresh(request: Request,response: Response,db: Session=Depends(get_db)):
         _clear_refresh_cookie(response)
         raise HTTPException(status_code=401,detail="Account is unavailable")
     _same_session_id,new_raw,new_digest=create_refresh_secret(session.id)
-    session.refresh_token_hash=new_digest
-    session.last_used_at=now
+    # Compare-and-swap prevents two requests that read the same old hash from both
+    # succeeding. FOR UPDATE helps on PostgreSQL; the conditional UPDATE is the
+    # correctness guard on SQLite and other dialects without row-level locks.
+    rotated=db.execute(update(AuthSession).where(AuthSession.id==session.id,
+        AuthSession.refresh_token_hash==presented_digest,AuthSession.revoked_at.is_(None),
+        AuthSession.expires_at>now).values(refresh_token_hash=new_digest,last_used_at=now)
+        .execution_options(synchronize_session=False))
+    if rotated.rowcount != 1:
+        db.rollback()
+        current=db.get(AuthSession,session_id)
+        if current and current.revoked_at is None and _aware(current.expires_at)>now and not hmac.compare_digest(current.refresh_token_hash,presented_digest):
+            _record_refresh_reuse(db,current,now)
+            _clear_refresh_cookie(response)
+            raise HTTPException(status_code=401,detail="Refresh token reuse detected; sign in again")
+        _clear_refresh_cookie(response)
+        raise HTTPException(status_code=401,detail="Refresh session is invalid or expired")
     db.commit()
     _set_refresh_cookie(response,new_raw)
     return {"access_token":create_access_token(user,session.id),"token_type":"bearer","expires_in":settings.access_token_minutes*60,"user":_user_payload(user)}

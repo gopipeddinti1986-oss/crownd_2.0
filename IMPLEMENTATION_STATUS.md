@@ -1,6 +1,6 @@
 # CROWND implementation status
 
-Updated: 2026-11-25, after Phase 8 notification implementation and local verification. Phases 1–8 implementation and local verification are recorded below; production readiness is not implied. This checklist is conservative: checked items are implemented and the indicated tests passed; not checked means incomplete or unverified. Detailed task/dependency plan: [`docs/DEVELOPMENT_ROADMAP.md`](docs/DEVELOPMENT_ROADMAP.md).
+Updated: 2026-11-25, after Phase 9 system-wide local QA and defect regressions. Phases 1–9 implementation/verification records and limitations are recorded below; production readiness is not implied. This checklist is conservative: checked items are implemented and the indicated tests passed; not checked means incomplete or unverified. Detailed task/dependency plan: [`docs/DEVELOPMENT_ROADMAP.md`](docs/DEVELOPMENT_ROADMAP.md).
 
 ## Verified audit baseline
 
@@ -94,6 +94,14 @@ Updated: 2026-11-25, after Phase 8 notification implementation and local verific
 - [x] Added recipient-only paginated list/read/read-all/preferences APIs, user inbox/settings/unread badge, admin-only redacted delivery summary/list and operations health labels. Outbox monitor never returns recipients, content, ciphertext, tokens or SMTP details.
 - [x] Compose includes a separate worker and local Mailpit. Architecture, event semantics, API, migration, settings, deployment and limitations are documented in [`docs/PHASE_8_NOTIFICATIONS.md`](docs/PHASE_8_NOTIFICATIONS.md).
 - [x] Local backend/frontend and migration verification results are recorded in the Phase 8 doc below; warnings/limitations include SQLite-only DB verification, no external SMTP receipt, unmeasured worker liveness, no browser E2E and no multi-worker/PostgreSQL concurrency test.
+
+### Phase 9 — System-wide QA, integration and security validation (local checks completed; not production readiness)
+
+- [x] Reviewed role and ownership boundaries and the existing authentication, commerce/inventory/payment/COD, attribution/conversion/reward/ledger, campaign/admin/risk/dispute, analytics, notification/outbox, validation, frontend and migration coverage. Review is targeted; it is not an exhaustive independent security audit.
+- [x] Reproduced and fixed mixed-brand order visibility, suspended-brand public discovery/purchase availability, and concurrent refresh-token double rotation. Added regressions; details and before/after evidence are in [`docs/PHASE_9_QA_AUDIT.md`](docs/PHASE_9_QA_AUDIT.md).
+- [x] Full backend **68 passed**; frontend **38 passed**; ESLint, production build including `tsc -b`, Python compileall, `git diff --check`, npm audit (0 vulnerabilities reported), and targeted source-pattern scan passed. Existing Starlette/httpx deprecation, Recharts jsdom size warnings, and Vite >500 kB chunk warning remain documented.
+- [x] Copied the existing SQLite DB to a temporary file and successfully upgraded the copy from `0005_referral_attribution` through `0009_notifications`; SQLite integrity was `ok`, foreign-key check empty. Basic snapshot invariants were checked against a very small dataset. The original working DB remains at revision `0005` and was not migrated.
+- [ ] PostgreSQL, Docker/Compose, browser E2E/accessibility, Python dependency audit/SAST, external payment/refund/payout, SMTP delivery, competing outbox workers, broad concurrency/load, independent penetration testing and legal/privacy review were unavailable, not installed, or not exercised. See [`docs/PHASE_9_TEST_RESULTS.md`](docs/PHASE_9_TEST_RESULTS.md); SQLite is not evidence of PostgreSQL correctness. No production-readiness claim.
 
 ## In progress / partial
 

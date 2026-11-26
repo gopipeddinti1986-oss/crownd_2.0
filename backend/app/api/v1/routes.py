@@ -59,7 +59,7 @@ def update_creator(body:dict,db:Session=Depends(get_db),user:User=Depends(requir
 @router.get("/campaigns")
 def campaigns(q:str|None=None,status:str="published",limit:int=Query(30,ge=1,le=100),offset:int=Query(0,ge=0),db:Session=Depends(get_db)):
     now=datetime.now(timezone.utc)
-    stmt=select(Campaign,BrandProfile,User).join(BrandProfile,BrandProfile.user_id==Campaign.brand_id).join(User,User.id==Campaign.brand_id).where(Campaign.visibility=="public",Campaign.status=="published",or_(Campaign.starts_at.is_(None),Campaign.starts_at<=now),or_(Campaign.ends_at.is_(None),Campaign.ends_at>=now))
+    stmt=select(Campaign,BrandProfile,User).join(BrandProfile,BrandProfile.user_id==Campaign.brand_id).join(User,User.id==Campaign.brand_id).where(Campaign.visibility=="public",Campaign.status=="published",User.role=="brand",User.is_active.is_(True),or_(Campaign.starts_at.is_(None),Campaign.starts_at<=now),or_(Campaign.ends_at.is_(None),Campaign.ends_at>=now))
     if status not in {"all","published"}: return []
     if q: stmt=stmt.where((Campaign.title.ilike(f"%{q}%"))|(Campaign.category.ilike(f"%{q}%"))|(Campaign.description.ilike(f"%{q}%")))
     rows=db.execute(stmt.order_by(Campaign.created_at.desc()).offset(offset).limit(min(limit,100))).all()
@@ -90,7 +90,7 @@ def update_campaign_products(campaign_id:int,body:CampaignProductsUpdate,db:Sess
     return {"campaign_id":campaign.id,"product_ids":sorted(body.product_ids)}
 @router.get("/campaigns/{campaign_id}")
 def campaign_detail(campaign_id:int,db:Session=Depends(get_db)):
-    c=db.scalar(select(Campaign).where(Campaign.id==campaign_id,Campaign.visibility=="public",Campaign.status=="published"))
+    c=db.scalar(select(Campaign).join(User,User.id==Campaign.brand_id).where(Campaign.id==campaign_id,Campaign.visibility=="public",Campaign.status=="published",User.role=="brand",User.is_active.is_(True)))
     if not c or not campaign_is_active(c): raise HTTPException(404,"Campaign not found")
     return {"id":c.id,"title":c.title,"description":c.description,"brand_id":c.brand_id,"product_id":c.product_id,"category":c.category,"platforms":c.platforms,"reward_model":c.reward_model,"reward_rate":str(c.reward_rate),"budget":str(c.budget),"status":c.status,"starts_at":c.starts_at.isoformat() if c.starts_at else None,"ends_at":c.ends_at.isoformat() if c.ends_at else None,"objectives":c.objectives or [],"target_audience":c.target_audience or "","creator_requirements":c.creator_requirements or "","visibility":c.visibility or "public","performance_goals":c.performance_goals or {}}
 @router.patch("/campaigns/{campaign_id}/status")
@@ -107,7 +107,8 @@ def change_campaign(campaign_id:int,body:CampaignStatusUpdate,db:Session=Depends
 @router.post("/campaigns/{campaign_id}/applications",status_code=201)
 def apply(campaign_id:int,body:dict,db:Session=Depends(get_db),user:User=Depends(require_role("creator"))):
     c=db.get(Campaign,campaign_id)
-    if not c or c.visibility!="public" or not campaign_is_active(c): raise HTTPException(404,"Campaign is not accepting applications")
+    brand=db.get(User,c.brand_id) if c else None
+    if not c or c.visibility!="public" or not brand or brand.role!="brand" or not brand.is_active or not campaign_is_active(c): raise HTTPException(404,"Campaign is not accepting applications")
     existing=db.scalar(select(Application).where(Application.campaign_id==campaign_id,Application.creator_id==user.id))
     if existing: raise HTTPException(409,"You have already applied to this campaign")
     a=Application(campaign_id=campaign_id,creator_id=user.id,message=body.get("message","")); db.add(a); db.flush()
@@ -154,7 +155,7 @@ def create_product(body:ProductCreate,db:Session=Depends(get_db),user:User=Depen
 
 @router.get("/referrals/eligible-campaigns")
 def eligible_referral_campaigns(db:Session=Depends(get_db),user:User=Depends(require_role("creator"))):
-    stmt=select(Campaign).join(Application,Application.campaign_id==Campaign.id).where(Application.creator_id==user.id,Application.status=="accepted",Campaign.status=="published").order_by(Campaign.created_at.desc())
+    stmt=select(Campaign).join(Application,Application.campaign_id==Campaign.id).join(User,User.id==Campaign.brand_id).where(Application.creator_id==user.id,Application.status=="accepted",Campaign.status=="published",User.role=="brand",User.is_active.is_(True)).order_by(Campaign.created_at.desc())
     rows=db.scalars(stmt).all()
     return [{"id":campaign.id,"title":campaign.title,"product_ids":eligible_product_ids(db,campaign),"ends_at":campaign.ends_at.isoformat() if campaign.ends_at else None} for campaign in rows if campaign_is_active(campaign)]
 
