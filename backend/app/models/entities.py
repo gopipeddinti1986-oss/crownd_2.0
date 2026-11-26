@@ -96,6 +96,11 @@ class Campaign(Base):
     status: Mapped[str] = mapped_column(String(24), default="draft", index=True)
     starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    objectives: Mapped[list] = mapped_column(JSON, default=list)
+    target_audience: Mapped[str] = mapped_column(String(500), default="")
+    creator_requirements: Mapped[str] = mapped_column(Text, default="")
+    visibility: Mapped[str] = mapped_column(String(16), default="public")
+    performance_goals: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 class CampaignProduct(Base):

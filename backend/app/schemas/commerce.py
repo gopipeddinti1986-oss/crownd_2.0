@@ -91,6 +91,29 @@ class CampaignCreate(BaseModel):
     budget: Decimal = Field(default=Decimal("0"), ge=0, max_digits=12, decimal_places=2)
     starts_at: datetime | None = None
     ends_at: datetime | None = None
+    objectives: list[str] = Field(default_factory=list, max_length=10)
+    target_audience: str = Field(default="", max_length=500)
+    creator_requirements: str = Field(default="", max_length=3000)
+    visibility: Literal["public", "unlisted"] = "public"
+    performance_goals: dict[str, Decimal] = Field(default_factory=dict)
+
+    @field_validator("objectives")
+    @classmethod
+    def validate_objectives(cls, value: list[str]) -> list[str]:
+        cleaned=[item.strip() for item in value if item.strip()]
+        if len(cleaned)!=len(value) or any(len(item)>120 for item in cleaned):
+            raise ValueError("Objectives must be non-empty and at most 120 characters")
+        return cleaned
+
+    @field_validator("performance_goals")
+    @classmethod
+    def validate_performance_goals(cls, value: dict[str, Decimal]) -> dict[str, Decimal]:
+        allowed={"confirmed_revenue","confirmed_conversions","clicks","conversion_rate_pct","reward_efficiency"}
+        if set(value)-allowed or any(amount<0 for amount in value.values()):
+            raise ValueError("Performance goals contain an unsupported metric or negative target")
+        if "conversion_rate_pct" in value and value["conversion_rate_pct"]>100:
+            raise ValueError("Conversion rate goal cannot exceed 100 percent")
+        return value
 
     @field_validator("product_ids")
     @classmethod
@@ -106,6 +129,62 @@ class CampaignCreate(BaseModel):
         if value and start and value <= start:
             raise ValueError("Campaign end must follow its start")
         return value
+
+class CampaignStatusUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["published", "paused", "completed", "cancelled", "rejected"]
+
+
+class CampaignUpdate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    title: str | None = Field(default=None, min_length=2, max_length=180)
+    description: str | None = Field(default=None, max_length=10000)
+    category: str | None = Field(default=None, min_length=2, max_length=80)
+    platforms: str | None = Field(default=None, max_length=200)
+    reward_model: Literal["percentage", "fixed"] | None = None
+    reward_rate: Decimal | None = Field(default=None, ge=0, max_digits=7, decimal_places=3)
+    budget: Decimal | None = Field(default=None, ge=0, max_digits=12, decimal_places=2)
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    product_id: int | None = Field(default=None, gt=0)
+    product_ids: list[int] | None = Field(default=None, max_length=50)
+    objectives: list[str] | None = Field(default=None, max_length=10)
+    target_audience: str | None = Field(default=None, max_length=500)
+    creator_requirements: str | None = Field(default=None, max_length=3000)
+    visibility: Literal["public", "unlisted"] | None = None
+    performance_goals: dict[str, Decimal] | None = None
+
+    @field_validator("product_ids")
+    @classmethod
+    def validate_products(cls, value: list[int] | None) -> list[int] | None:
+        if value is not None and (any(item<=0 for item in value) or len(value)!=len(set(value))):
+            raise ValueError("Product IDs must be positive and unique")
+        return value
+
+    @field_validator("objectives")
+    @classmethod
+    def validate_objectives(cls, value: list[str] | None) -> list[str] | None:
+        if value is not None and (any(not item.strip() or len(item.strip())>120 for item in value) or len([item.strip() for item in value])!=len(set(item.strip() for item in value))):
+            raise ValueError("Objectives must be distinct, non-empty and at most 120 characters")
+        return [item.strip() for item in value] if value is not None else None
+
+    @field_validator("performance_goals")
+    @classmethod
+    def validate_goals(cls, value: dict[str, Decimal] | None) -> dict[str, Decimal] | None:
+        allowed={"confirmed_revenue","confirmed_conversions","clicks","conversion_rate_pct","reward_efficiency"}
+        if value is not None and (set(value)-allowed or any(amount<0 for amount in value.values())):
+            raise ValueError("Performance goals contain an unsupported metric or negative target")
+        if value is not None and value.get("conversion_rate_pct",Decimal(0))>100:
+            raise ValueError("Conversion rate goal cannot exceed 100 percent")
+        return value
+
+    @field_validator("ends_at")
+    @classmethod
+    def update_end_after_start(cls, value, info):
+        start=info.data.get("starts_at")
+        if value and start and value<=start:raise ValueError("Campaign end must follow its start")
+        return value
+
 
 class ReferralLinkCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")

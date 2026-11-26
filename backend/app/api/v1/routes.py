@@ -17,12 +17,16 @@ from app.services.rewards import calculate_reward
 from app.api.v1.auth import router as auth_router
 from app.api.v1.commerce import router as commerce_router
 from app.api.v1.rewards import router as rewards_router
-from app.schemas.commerce import CampaignCreate, CampaignProductsUpdate, ProductCreate, ReferralLinkCreate, ReferralLinkUpdate, ReferralRiskReview
+from app.schemas.commerce import CampaignCreate, CampaignProductsUpdate, CampaignStatusUpdate, ProductCreate, ReferralLinkCreate, ReferralLinkUpdate, ReferralRiskReview
+from app.api.v1.campaigns import router as campaigns_router
+from app.api.v1.analytics import router as analytics_router
 
 router = APIRouter()
 router.include_router(auth_router)
 router.include_router(commerce_router)
 router.include_router(rewards_router)
+router.include_router(campaigns_router)
+router.include_router(analytics_router)
 def slugify(s): return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-") + "-" + secrets.token_hex(3)
 def money(n): return Decimal(str(n)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 def audit(db, actor, action, kind, entity):
@@ -48,12 +52,13 @@ def update_creator(body:dict,db:Session=Depends(get_db),user:User=Depends(requir
     db.commit(); return {"ok":True}
 
 @router.get("/campaigns")
-def campaigns(q:str|None=None,status:str="published",limit:int=30,offset:int=0,db:Session=Depends(get_db)):
-    stmt=select(Campaign,BrandProfile,User).join(BrandProfile,BrandProfile.user_id==Campaign.brand_id).join(User,User.id==Campaign.brand_id)
-    if status!="all": stmt=stmt.where(Campaign.status==status)
+def campaigns(q:str|None=None,status:str="published",limit:int=Query(30,ge=1,le=100),offset:int=Query(0,ge=0),db:Session=Depends(get_db)):
+    now=datetime.now(timezone.utc)
+    stmt=select(Campaign,BrandProfile,User).join(BrandProfile,BrandProfile.user_id==Campaign.brand_id).join(User,User.id==Campaign.brand_id).where(Campaign.visibility=="public",Campaign.status=="published",or_(Campaign.starts_at.is_(None),Campaign.starts_at<=now),or_(Campaign.ends_at.is_(None),Campaign.ends_at>=now))
+    if status not in {"all","published"}: return []
     if q: stmt=stmt.where((Campaign.title.ilike(f"%{q}%"))|(Campaign.category.ilike(f"%{q}%"))|(Campaign.description.ilike(f"%{q}%")))
     rows=db.execute(stmt.order_by(Campaign.created_at.desc()).offset(offset).limit(min(limit,100))).all()
-    return [{"id":c.id,"title":c.title,"slug":c.slug,"description":c.description,"category":c.category,"platforms":c.platforms,"reward_model":c.reward_model,"reward_rate":float(c.reward_rate),"budget":float(c.budget),"status":c.status,"brand":b.name,"brand_id":c.brand_id,"product_id":c.product_id,"created_at":c.created_at.isoformat()} for c,b,u in rows]
+    return [{"id":c.id,"title":c.title,"slug":c.slug,"description":c.description,"category":c.category,"platforms":c.platforms,"reward_model":c.reward_model,"reward_rate":float(c.reward_rate),"budget":float(c.budget),"status":c.status,"brand":b.name,"brand_id":c.brand_id,"product_id":c.product_id,"starts_at":c.starts_at.isoformat() if c.starts_at else None,"ends_at":c.ends_at.isoformat() if c.ends_at else None,"objectives":c.objectives or [],"target_audience":c.target_audience or "","creator_requirements":c.creator_requirements or "","visibility":c.visibility or "public","performance_goals":c.performance_goals or {},"created_at":c.created_at.isoformat()} for c,b,u in rows]
 @router.post("/campaigns",status_code=201)
 def create_campaign(body:CampaignCreate,db:Session=Depends(get_db),user:User=Depends(require_role("brand"))):
     requested=set(body.product_ids)
@@ -61,7 +66,7 @@ def create_campaign(body:CampaignCreate,db:Session=Depends(get_db),user:User=Dep
         requested.add(body.product_id)
     products=db.scalars(select(Product).where(Product.id.in_(requested),Product.brand_id==user.id,Product.status=="active")).all() if requested else []
     if len(products)!=len(requested): raise HTTPException(422,"Campaign products must be active products owned by your brand")
-    c=Campaign(brand_id=user.id,product_id=body.product_id,title=body.title,slug=slugify(body.title),description=body.description,category=body.category,platforms=body.platforms,reward_model=body.reward_model,reward_rate=body.reward_rate,budget=body.budget,status="draft",starts_at=body.starts_at,ends_at=body.ends_at)
+    c=Campaign(brand_id=user.id,product_id=body.product_id,title=body.title,slug=slugify(body.title),description=body.description,category=body.category,platforms=body.platforms,reward_model=body.reward_model,reward_rate=body.reward_rate,budget=body.budget,status="draft",starts_at=body.starts_at,ends_at=body.ends_at,objectives=body.objectives,target_audience=body.target_audience,creator_requirements=body.creator_requirements,visibility=body.visibility,performance_goals={key:str(value) for key,value in body.performance_goals.items()})
     db.add(c); db.flush()
     for product in products: db.add(CampaignProduct(campaign_id=c.id,product_id=product.id))
     audit(db,user,"campaign.created","campaign",c.id); db.commit(); return {"id":c.id,"status":c.status,"slug":c.slug,"product_ids":sorted(requested)}
@@ -80,23 +85,23 @@ def update_campaign_products(campaign_id:int,body:CampaignProductsUpdate,db:Sess
     return {"campaign_id":campaign.id,"product_ids":sorted(body.product_ids)}
 @router.get("/campaigns/{campaign_id}")
 def campaign_detail(campaign_id:int,db:Session=Depends(get_db)):
-    c=db.get(Campaign,campaign_id)
-    if not c: raise HTTPException(404,"Campaign not found")
-    return {"id":c.id,"title":c.title,"description":c.description,"brand_id":c.brand_id,"product_id":c.product_id,"category":c.category,"reward_model":c.reward_model,"reward_rate":float(c.reward_rate),"budget":float(c.budget),"status":c.status}
+    c=db.scalar(select(Campaign).where(Campaign.id==campaign_id,Campaign.visibility=="public",Campaign.status=="published"))
+    if not c or not campaign_is_active(c): raise HTTPException(404,"Campaign not found")
+    return {"id":c.id,"title":c.title,"description":c.description,"brand_id":c.brand_id,"product_id":c.product_id,"category":c.category,"platforms":c.platforms,"reward_model":c.reward_model,"reward_rate":str(c.reward_rate),"budget":str(c.budget),"status":c.status,"starts_at":c.starts_at.isoformat() if c.starts_at else None,"ends_at":c.ends_at.isoformat() if c.ends_at else None,"objectives":c.objectives or [],"target_audience":c.target_audience or "","creator_requirements":c.creator_requirements or "","visibility":c.visibility or "public","performance_goals":c.performance_goals or {}}
 @router.patch("/campaigns/{campaign_id}/status")
-def change_campaign(campaign_id:int,body:dict,db:Session=Depends(get_db),user:User=Depends(current_user)):
+def change_campaign(campaign_id:int,body:CampaignStatusUpdate,db:Session=Depends(get_db),user:User=Depends(current_user)):
     c=db.get(Campaign,campaign_id)
     if not c: raise HTTPException(404,"Campaign not found")
     if user.role!="admin" and (user.role!="brand" or c.brand_id!=user.id): raise HTTPException(403,"Not your campaign")
-    target=body.get("status"); allowed={"draft":{"published"},"published":{"paused","completed","cancelled"},"paused":{"published","cancelled"}}
-    if user.role!="admin" and target not in allowed.get(c.status,set()): raise HTTPException(409,"Invalid campaign status transition")
-    if target not in {"draft","published","paused","completed","cancelled","rejected"}: raise HTTPException(422,"Unsupported status")
+    target=body.status
+    allowed={"draft":{"published","cancelled"},"published":{"paused","completed","cancelled"},"paused":{"published","completed","cancelled"}}
+    if target not in allowed.get(c.status,set()) and not (user.role=="admin" and target=="rejected"): raise HTTPException(409,"Invalid campaign status transition")
     c.status=target; audit(db,user,"campaign.status_changed","campaign",c.id); db.commit(); return {"id":c.id,"status":c.status}
 
 @router.post("/campaigns/{campaign_id}/applications",status_code=201)
 def apply(campaign_id:int,body:dict,db:Session=Depends(get_db),user:User=Depends(require_role("creator"))):
     c=db.get(Campaign,campaign_id)
-    if not c or not campaign_is_active(c): raise HTTPException(404,"Campaign is not accepting applications")
+    if not c or c.visibility!="public" or not campaign_is_active(c): raise HTTPException(404,"Campaign is not accepting applications")
     existing=db.scalar(select(Application).where(Application.campaign_id==campaign_id,Application.creator_id==user.id))
     if existing: raise HTTPException(409,"You have already applied to this campaign")
     a=Application(campaign_id=campaign_id,creator_id=user.id,message=body.get("message","")); db.add(a); db.commit(); db.refresh(a); return {"id":a.id,"status":a.status}
