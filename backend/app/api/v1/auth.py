@@ -1,7 +1,5 @@
 from datetime import timedelta
 import hmac
-import secrets
-import logging
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -12,10 +10,9 @@ from app.models.entities import AuthActionToken, AuthSession, BrandProfile, Crea
 from app.schemas.auth import LoginRequest, PasswordResetConfirm, PasswordResetRequest, RegisterRequest, TokenRequest
 from app.security import _digest, _dummy_hash, create_access_token, current_user, create_refresh_secret, rate_limit_key, require_trusted_origin, verify_and_update_password, hash_password, verify_refresh_secret
 from app.services.auth import consume_action_token, create_session, issue_action_token, revoke_sessions, utcnow, _aware
-from app.services.email import EmailDeliveryError, OutgoingEmail, send_account_email
+from app.services.notifications import create_notification, enqueue_action_email
 from slowapi import Limiter
 
-logger=logging.getLogger("crownd.auth")
 router=APIRouter(prefix="/auth",tags=["authentication"])
 limiter=Limiter(key_func=rate_limit_key,storage_uri=settings.rate_limit_storage_uri,enabled=settings.rate_limit_enabled,headers_enabled=True)
 
@@ -25,7 +22,7 @@ def _user_payload(user: User) -> dict:
 def _delivery_state() -> dict:
     if settings.email_mode=="disabled":
         return {"message":"Email verification is required. Email delivery is disabled; no message was sent. Configure SMTP and request a fresh link.","email_delivery_enabled":False}
-    return {"message":"If this address is eligible, check for a verification message. Provider acceptance does not guarantee inbox delivery.","email_delivery_enabled":True}
+    return {"message":"If this address is eligible, check for a verification message after background email processing. Provider acceptance does not guarantee inbox delivery.","email_delivery_enabled":True}
 
 def _set_refresh_cookie(response: Response,raw: str) -> None:
     response.set_cookie(key="crownd_refresh",value=raw,max_age=settings.refresh_token_days*24*60*60,path="/api/v1/auth",secure=settings.use_secure_cookies,httponly=True,samesite=settings.cookie_samesite.lower(),domain=settings.cookie_domain or None)
@@ -37,25 +34,10 @@ def _clear_refresh_cookie(response: Response) -> None:
     response.headers["Cache-Control"]="no-store"
     response.headers["Pragma"]="no-cache"
 
-def _send_action_email(user: User,purpose: str,token: str) -> bool:
-    if purpose=="verify_email":
-        subject="Verify your CROWND email"
-        path="/verify-email"
-        description="Confirm your email address to finish creating your CROWND account."
-    else:
-        subject="Reset your CROWND password"
-        path="/reset-password"
-        description="Use this one-time link to set a new CROWND password. If you did not request this, ignore this email."
-    # Place credentials in a URL fragment: browsers do not send fragments in HTTP requests/access logs.
-    link=f"{settings.frontend_base_url.rstrip('/')}{path}#token={token}"
-    return send_account_email(OutgoingEmail(to=user.email,subject=subject,text=f"{description}\n\n{link}\n\nThis link expires soon and can only be used once."))
-
-def _attempt_email(user: User,purpose: str,token: str) -> None:
-    try:
-        _send_action_email(user,purpose,token)
-    except EmailDeliveryError:
-        # Do not log recipient, token, message body or SMTP response.
-        logger.warning("Configured account email provider rejected a message (purpose=%s)",purpose)
+def _attempt_email(db: Session,user: User,purpose: str,token: str) -> None:
+    # Queue inside the action-token transaction. The outbox encrypts the one-use link at rest;
+    # the SMTP provider runs only in the separate worker process.
+    enqueue_action_email(db,user,purpose,token,settings.frontend_base_url)
 
 @router.post("/register",status_code=202)
 @limiter.limit("10/minute")
@@ -75,11 +57,11 @@ def register(body: RegisterRequest,request: Request,response: Response,db: Sessi
             elif body.role=="brand":
                 db.add(BrandProfile(user_id=user.id,name=body.brand_name or body.name,industry=body.industry or "Consumer",website=body.website or ""))
             token=issue_action_token(db,user,"verify_email",timedelta(hours=settings.verification_token_hours))
+            _attempt_email(db,user,"verify_email",token)
             db.commit()
         except IntegrityError:
             db.rollback()
             return _delivery_state()
-        _attempt_email(user,"verify_email",token)
     return _delivery_state()
 
 @router.post("/login")
@@ -117,6 +99,12 @@ def refresh(request: Request,response: Response,db: Session=Depends(get_db)):
         raise HTTPException(status_code=401,detail="Refresh session is invalid or expired")
     if not hmac.compare_digest(session.refresh_token_hash,_digest(raw)):
         session.revoked_at=now
+        account=db.get(User,session.user_id)
+        if account:
+            notice="A refresh token was reused, so CROWND revoked that session. Sign in again and reset your password if you do not recognize this activity."
+            create_notification(db,recipient_id=account.id,event_key=f"session-reuse:{session.id}",category="security",
+                title="Session security alert",body=notice,action_path="/settings/notifications",
+                email_subject="CROWND session security alert",email_body=notice,essential_email=True)
         db.commit()
         _clear_refresh_cookie(response)
         raise HTTPException(status_code=401,detail="Refresh token reuse detected; sign in again")
@@ -175,8 +163,8 @@ def request_verification(body: PasswordResetRequest,request: Request,response: R
     user=db.scalar(select(User).where(User.email==body.email.lower()))
     if user and user.is_active and not user.email_verified:
         token=issue_action_token(db,user,"verify_email",timedelta(hours=settings.verification_token_hours))
+        _attempt_email(db,user,"verify_email",token)
         db.commit()
-        _attempt_email(user,"verify_email",token)
     return _delivery_state()
 
 @router.post("/email/verification/confirm")
@@ -189,6 +177,8 @@ def confirm_verification(body: TokenRequest,request: Request,response: Response,
     _token,user=result
     user.email_verified=True
     db.execute(update(AuthActionToken).where(AuthActionToken.user_id==user.id,AuthActionToken.purpose=="verify_email",AuthActionToken.consumed_at.is_(None)).values(consumed_at=utcnow()))
+    create_notification(db,recipient_id=user.id,event_key=f"email-verified:{_token.id}",category="account",
+        title="Email verified",body="Your CROWND email address is verified. You can now sign in.",action_path="/settings/notifications")
     db.commit()
     return {"message":"Email verified. You can now sign in."}
 
@@ -198,9 +188,9 @@ def request_password_reset(body: PasswordResetRequest,request: Request,response:
     user=db.scalar(select(User).where(User.email==body.email.lower()))
     if user and user.is_active and user.email_verified:
         token=issue_action_token(db,user,"password_reset",timedelta(minutes=settings.password_reset_token_minutes))
+        _attempt_email(db,user,"password_reset",token)
         db.commit()
-        _attempt_email(user,"password_reset",token)
-    return {"message":"If an eligible account exists, CROWND can attempt delivery when email is configured. Provider acceptance does not guarantee inbox delivery.","email_delivery_enabled":settings.email_mode=="smtp"}
+    return {"message":"If an eligible account exists, CROWND can queue a message. Background processing and a configured email provider are required; delivery is not guaranteed.","email_delivery_enabled":settings.email_mode=="smtp"}
 
 @router.post("/password/reset/confirm")
 @limiter.limit("10/minute")
@@ -212,5 +202,9 @@ def confirm_password_reset(body: PasswordResetConfirm,request: Request,response:
     _token,user=result
     user.password_hash=hash_password(body.new_password)
     revoke_sessions(db,user.id)
+    create_notification(db,recipient_id=user.id,event_key=f"password-reset-completed:{_token.id}",category="security",
+        title="Password changed",body="Your password was changed. If this was not you, reset it again and review your account sessions.",
+        action_path="/settings/notifications",email_subject="Your CROWND password was changed",
+        email_body="Your CROWND password was changed. If this was not you, reset it again and contact support.",essential_email=True)
     db.commit()
     return {"message":"Password updated. Please sign in again."}

@@ -473,3 +473,46 @@ event.listen(AdminAuditEvent, "before_update", _deny_append_only_mutation)
 event.listen(AdminAuditEvent, "before_delete", _deny_append_only_mutation)
 event.listen(AdminDisputeEvent, "before_update", _deny_append_only_mutation)
 event.listen(AdminDisputeEvent, "before_delete", _deny_append_only_mutation)
+
+class NotificationPreference(Base):
+    __tablename__ = "notification_preferences"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True)
+    in_app_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    email_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    category_settings: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+class Notification(Base):
+    __tablename__ = "notifications"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    recipient_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    event_key: Mapped[str] = mapped_column(String(160))
+    category: Mapped[str] = mapped_column(String(32), index=True)
+    title: Mapped[str] = mapped_column(String(160))
+    body: Mapped[str] = mapped_column(String(1000))
+    action_path: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    __table_args__ = (UniqueConstraint("recipient_id", "event_key", name="uq_notification_recipient_event"),)
+
+class EmailDelivery(Base):
+    __tablename__ = "email_deliveries"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    recipient_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    event_key: Mapped[str] = mapped_column(String(160))
+    category: Mapped[str] = mapped_column(String(32), index=True)
+    essential: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    encrypted_message: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    __table_args__ = (
+        UniqueConstraint("recipient_id", "event_key", name="uq_email_delivery_recipient_event"),
+        CheckConstraint("status IN ('pending','sending','sent','suppressed','failed')", name="ck_email_delivery_status"),
+        CheckConstraint("attempt_count >= 0", name="ck_email_delivery_attempt_count"),
+    )

@@ -10,6 +10,7 @@ from app.models.entities import (Application, AuditLog, Campaign, Conversion, Le
     Product, Referral, ReferralRiskFlag, Reward, RewardEvent, RewardRule, SimulatedPayout, User)
 from app.services.conversions import flag_risk
 from app.services.referrals import referral_eligibility
+from app.services.notifications import create_notification
 
 CENT = Decimal("0.01")
 ZERO = Decimal("0.00")
@@ -232,7 +233,16 @@ def generate_order_rewards(db: Session, order: Order, *, stage: str, actor_id: i
     for group in groups.values():
         reward=_record_reward(db,order=order,conversion=conversion,referral=group["referral"],campaign=group["campaign"],
             product=group["product"],lines=group["items"],customer=customer,demo=stage=="demo",stage=stage,actor_id=actor_id)
-        if reward:result.append(reward)
+        if reward:
+            result.append(reward)
+            if stage=="demo":
+                title="Simulated reward recorded"
+                notice=f"A simulated reward record was created for order {order.public_id}. It is not payable and no money was transferred."
+            else:
+                title="Reward record updated"
+                notice=f"A reward record for order {order.public_id} was created after cash collection was recorded. This is a platform ledger entry, not a payout or money transfer."
+            create_notification(db,recipient_id=reward.creator_id,event_key=f"reward-created:{reward.id}",category="reward",
+                title=title,body=notice,action_path="/earnings",email_subject=title,email_body=notice)
     return result
 
 

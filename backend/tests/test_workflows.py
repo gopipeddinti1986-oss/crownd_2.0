@@ -45,7 +45,7 @@ def client(db_engine,monkeypatch):
 @pytest.fixture
 def emails(monkeypatch):
     sent=[]
-    monkeypatch.setattr(auth_routes,"_send_action_email",lambda user,purpose,token: sent.append({"to":user.email,"purpose":purpose,"token":token}) or True)
+    monkeypatch.setattr(auth_routes,"_attempt_email",lambda db,user,purpose,token: sent.append({"to":user.email,"purpose":purpose,"token":token}))
     return sent
 
 def register(client,email="person@example.com",role="creator",name="Test Person",password="a-very-strong-password"):
@@ -247,7 +247,11 @@ def test_campaign_application_referral_order_and_reward(client,emails):
     assert client.post(f"/api/v1/campaigns/{camp['id']}/applications",headers=creator,json={"message":"Love the product"}).status_code==201
     applications=client.get("/api/v1/applications",headers=brand).json()
     assert len(applications)==1
+    brand_notices=client.get("/api/v1/notifications",headers=brand).json()["items"]
+    assert any(item["title"]=="Campaign application received" for item in brand_notices)
     assert client.patch(f"/api/v1/applications/{applications[0]['id']}",headers=brand,json={"status":"accepted"}).status_code==200
+    creator_notices=client.get("/api/v1/notifications",headers=creator).json()["items"]
+    assert any(item["title"]=="Application update" for item in creator_notices)
     ref=client.get("/api/v1/referrals/me",headers=creator).json()[0]
     assert client.get(f"/api/v1/r/{ref['code']}").status_code==200
     assert client.post("/api/v1/orders",json={"customer_name":"Guest","customer_email":"guest@example.com","product_id":product["id"],"quantity":1,"simulate_payment":True}).status_code==410
@@ -258,6 +262,10 @@ def test_campaign_application_referral_order_and_reward(client,emails):
     assert order.status_code==201 and order.json()["payment_status"]=="paid" and order.json()["payment_method"]=="demo"
     reward=client.get("/api/v1/rewards/me",headers=creator).json()
     assert len(reward)==1 and reward[0]["amount"]==200.0 and reward[0]["status"]=="simulated" and reward[0]["is_demo"] is True and reward[0]["payable"] is False
+    customer_notices=client.get("/api/v1/notifications",headers=customer).json()["items"]
+    assert any("No real money was charged" in item["body"] for item in customer_notices)
+    creator_notices=client.get("/api/v1/notifications",headers=creator).json()["items"]
+    assert any("not payable" in item["body"] and "no money was transferred" in item["body"] for item in creator_notices)
 
 def test_campaign_duplicate_application_prevented(client,emails):
     _,brand=verified_login(client,emails,"dupbrand@test.example","brand","Dup Brand")

@@ -27,6 +27,12 @@ class SMTPEmailProvider(EmailProvider):
     def send(self, message: OutgoingEmail) -> bool:
         if not settings.smtp_host or not settings.email_from:
             raise EmailDeliveryError("SMTP delivery is enabled but SMTP_HOST/EMAIL_FROM is missing")
+        # Reject line breaks and controls before values reach RFC mail headers.
+        for value in (settings.email_from, message.to, message.subject):
+            if any(ord(char) < 32 or ord(char) == 127 for char in value):
+                raise EmailDeliveryError("Email header contains unsupported characters")
+        if len(message.to) > 255 or "@" not in message.to or len(message.subject) > 160:
+            raise EmailDeliveryError("Email headers are invalid")
         email=EmailMessage()
         email["From"]=settings.email_from
         email["To"]=message.to

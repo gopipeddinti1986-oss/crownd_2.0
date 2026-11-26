@@ -18,6 +18,7 @@ from app.services.payments import process_demo_payment
 from app.services.referrals import attribution_state, campaign_is_active, eligible_product_ids, referral_eligibility, signed_referral_from_request, track_activity, visitor_hash
 from app.services.conversions import create_conversion, transition_conversion
 from app.services.rewards_engine import cancel_pending_collection_rewards, collect_cod_rewards, generate_order_rewards, self_referral
+from app.services.notifications import create_notification
 
 router = APIRouter()
 REFERRAL_COOKIE = "crownd_referral"
@@ -385,6 +386,19 @@ def checkout(body: CheckoutRequest, request: Request, response: Response, idempo
     else:
         db.add(PaymentAttempt(order_id=order.id, attempt_number=1, idempotency_key=idempotency_key, payment_method="cod", status="unpaid", amount=subtotal, currency="INR", notes="Payment will be collected on delivery."))
 
+    if body.payment_method == "cod":
+        title = "Order placed"
+        notice = f"Order {order.public_id} was placed with cash on delivery. No payment has been collected; cash collection is recorded only after delivery."
+    elif order.payment_status == "paid":
+        title = "Demo order confirmed"
+        notice = f"The demo payment simulation recorded success for order {order.public_id}. No real money was charged or transferred."
+    else:
+        title = "Demo payment failed"
+        notice = f"The demo payment simulation failed for order {order.public_id}; the order was cancelled and inventory restored. No real money was charged."
+    create_notification(db, recipient_id=user.id, event_key=f"order-created:{order.id}", category="order",
+        title=title, body=notice, action_path=f"/orders/{order.public_id}",
+        email_subject=title, email_body=notice)
+
     try:
         db.commit()
     except IntegrityError:
@@ -477,6 +491,11 @@ def admin_collect_cod_payment(order_id: str, db: Session = Depends(get_db), user
     transition_conversion(db, conversion, "confirmed", event_key=f"cod-collected:{order.id}", event_type="cod_collection_confirmed", actor_id=user.id)
     collect_cod_rewards(db,order,user.id)
     db.add(AuditLog(actor_id=user.id, action="order.cod_payment_collected", entity_type="order", entity_id=order.public_id))
+    if order.customer_id:
+        notice = f"Cash collection for order {order.public_id} was recorded by an administrator after delivery. No digital transaction or payout occurred."
+        create_notification(db, recipient_id=order.customer_id, event_key=f"cod-collected:{order.id}", category="order",
+            title="Cash collection recorded", body=notice, action_path=f"/orders/{order.public_id}",
+            email_subject="Cash collection recorded", email_body=notice)
     db.commit()
     db.refresh(order)
     return _order_payload(db, order)
@@ -524,6 +543,11 @@ def _cancel_order_record(db: Session, order: Order, actor: User) -> dict:
     conversion = _conversion_for_order(db, order)
     transition_conversion(db, conversion, "cancelled", event_key=f"order-cancelled:{order.id}", event_type="order_cancelled", actor_id=actor.id, reason="order_cancelled")
     cancel_pending_collection_rewards(db,order,actor.id)
+    if order.customer_id:
+        notice = f"Order {order.public_id} was cancelled in CROWND and eligible inventory was restored. No refund was processed."
+        create_notification(db, recipient_id=order.customer_id, event_key=f"order-cancelled:{order.id}", category="order",
+            title="Order cancelled", body=notice, action_path=f"/orders/{order.public_id}",
+            email_subject="Order cancelled", email_body=notice)
     db.commit()
     return _order_payload(db, order)
 
@@ -566,6 +590,11 @@ def update_order_status(order_id: str, body: OrderStatusUpdate, request: Request
         raise HTTPException(status_code=409, detail="Order state changed; reload and retry")
     db.expire(order)
     db.add(AuditLog(actor_id=user.id, action=f"order.status.{body.status}", entity_type="order", entity_id=order.public_id))
+    if order.customer_id:
+        notice = f"Order {order.public_id} status was updated to {body.status} in CROWND by an administrator. Carrier tracking is not connected to this platform."
+        create_notification(db, recipient_id=order.customer_id, event_key=f"order-status:{order.id}:{body.status}", category="order",
+            title="Order status updated", body=notice, action_path=f"/orders/{order.public_id}",
+            email_subject="Order status updated", email_body=notice)
     db.commit()
     db.refresh(order)
     return _order_payload(db, order)

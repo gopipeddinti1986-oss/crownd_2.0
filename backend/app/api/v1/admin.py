@@ -1,14 +1,17 @@
 """Audited platform administration workflows. All authorization is server-side."""
 from datetime import datetime, timezone
+from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models.entities import (AdminAuditEvent, AdminDispute, AdminDisputeEvent, AuthSession,
+from app.core.config import settings
+from app.models.entities import (AdminAuditEvent, AdminDispute, AdminDisputeEvent, AuthSession, EmailDelivery,
     BrandProfile, Campaign, Conversion, CreatorProfile, Order, ReferralRiskFlag, Reward, User)
 from app.security import require_role
 from app.services.auth import revoke_sessions
+from app.services.notifications import create_notification
 
 router = APIRouter()
 
@@ -81,7 +84,14 @@ def operations_overview(db: Session = Depends(get_db), user: User = Depends(requ
             "unverified_brands": count(select(func.count(BrandProfile.id)).where(BrandProfile.verification == "unverified")),
             "campaigns_needing_moderation": count(select(func.count(Campaign.id)).where(Campaign.status == "draft")),
         },
-        "notifications": {"delivery": "unavailable", "reason": "No persisted notification or delivery provider is configured."},
+        "notifications": {
+            "delivery": "sql_outbox_available",
+            "provider": "smtp_configured" if settings.email_mode == "smtp" and settings.smtp_host and settings.email_from else "disabled_or_incomplete",
+            "worker_status": "not_measured",
+            "pending": count(select(func.count(EmailDelivery.id)).where(EmailDelivery.status == "pending")),
+            "failed": count(select(func.count(EmailDelivery.id)).where(EmailDelivery.status == "failed")),
+            "suppressed": count(select(func.count(EmailDelivery.id)).where(EmailDelivery.status == "suppressed")),
+        },
     }
 
 
@@ -127,6 +137,11 @@ def change_user_lifecycle(user_id: int, body: LifecycleAction, db: Session = Dep
         revoke_sessions(db, target.id)
     audit(db, user, "user.reactivated" if body.active else "user.suspended", "user", target.id, body.reason,
           {"active": body.active, "sessions_revoked": not body.active})
+    notice = ("A CROWND administrator restored access to your account." if body.active else
+              "A CROWND administrator suspended access to your account. Contact support if you believe this is a mistake.")
+    create_notification(db,recipient_id=target.id,event_key=f"user-lifecycle:{target.id}:{uuid4().hex}",category="security",
+        title="Account access updated",body=notice,action_path="/settings/notifications",
+        email_subject="Your CROWND account access was updated",email_body=notice,essential_email=True)
     db.commit()
     return {"id": target.id, "active": target.is_active, "sessions_revoked": not body.active}
 
@@ -170,6 +185,10 @@ def moderate_campaign(campaign_id: int, body: ModerationAction, db: Session = De
     campaign.status = body.status
     audit(db, user, f"campaign.moderation.{body.status}", "campaign", campaign.id, body.reason,
           {"from_status": previous, "to_status": body.status})
+    notice = f"Your campaign moderation status was updated to {body.status}. The platform status is recorded for review and publishing."
+    create_notification(db,recipient_id=campaign.brand_id,event_key=f"campaign-moderated:{campaign.id}:{uuid4().hex}",category="campaign",
+        title="Campaign moderation update",body=notice,action_path="/brand/campaigns",
+        email_subject="Campaign moderation update",email_body=notice)
     db.commit()
     return {"id": campaign.id, "from_status": previous, "status": campaign.status}
 

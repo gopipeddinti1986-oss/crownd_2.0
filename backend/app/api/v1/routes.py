@@ -21,6 +21,8 @@ from app.schemas.commerce import CampaignCreate, CampaignProductsUpdate, Campaig
 from app.api.v1.campaigns import router as campaigns_router
 from app.api.v1.analytics import router as analytics_router
 from app.api.v1.admin import router as admin_router
+from app.api.v1.notifications import router as notifications_router
+from app.services.notifications import create_notification
 
 router = APIRouter()
 router.include_router(auth_router)
@@ -29,6 +31,7 @@ router.include_router(rewards_router)
 router.include_router(campaigns_router)
 router.include_router(analytics_router)
 router.include_router(admin_router)
+router.include_router(notifications_router)
 def slugify(s): return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-") + "-" + secrets.token_hex(3)
 def money(n): return Decimal(str(n)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 def audit(db, actor, action, kind, entity):
@@ -107,7 +110,12 @@ def apply(campaign_id:int,body:dict,db:Session=Depends(get_db),user:User=Depends
     if not c or c.visibility!="public" or not campaign_is_active(c): raise HTTPException(404,"Campaign is not accepting applications")
     existing=db.scalar(select(Application).where(Application.campaign_id==campaign_id,Application.creator_id==user.id))
     if existing: raise HTTPException(409,"You have already applied to this campaign")
-    a=Application(campaign_id=campaign_id,creator_id=user.id,message=body.get("message","")); db.add(a); db.commit(); db.refresh(a); return {"id":a.id,"status":a.status}
+    a=Application(campaign_id=campaign_id,creator_id=user.id,message=body.get("message","")); db.add(a); db.flush()
+    notice="A creator submitted an application to your campaign. Review the application in your workspace."
+    create_notification(db,recipient_id=c.brand_id,event_key=f"application-submitted:{a.id}",category="application",
+        title="Campaign application received",body=notice,action_path="/applications",
+        email_subject="A creator applied to your campaign",email_body=notice)
+    db.commit(); db.refresh(a); return {"id":a.id,"status":a.status}
 @router.get("/applications")
 def applications(db:Session=Depends(get_db),user:User=Depends(current_user)):
     stmt=select(Application,Campaign,User).join(Campaign,Campaign.id==Application.campaign_id).join(User,User.id==Application.creator_id)
@@ -123,12 +131,19 @@ def review_application(application_id:int,body:dict,db:Session=Depends(get_db),u
     if user.role!="admin" and (user.role!="brand" or c.brand_id!=user.id): raise HTTPException(403,"Forbidden")
     status=body.get("status")
     if status not in ("shortlisted","accepted","rejected"): raise HTTPException(422,"Invalid application status")
+    previous_status=a.status
     a.status=status
     if status=="accepted" and campaign_is_active(c) and not db.scalar(select(Referral.id).where(Referral.campaign_id==c.id,Referral.creator_id==a.creator_id)):
         db.add(Referral(campaign_id=c.id,creator_id=a.creator_id,code=generate_referral_code(db),active=True))
     if status!="accepted":
         db.execute(update(Referral).where(Referral.campaign_id==c.id,Referral.creator_id==a.creator_id).values(active=False))
-    audit(db,user,f"application.{status}","application",a.id); db.commit(); return {"id":a.id,"status":status}
+    audit(db,user,f"application.{status}","application",a.id)
+    if previous_status!=status:
+        notice=f"Your application status was updated to {status}."
+        create_notification(db,recipient_id=a.creator_id,event_key=f"application-reviewed:{a.id}:{uuid4().hex}",category="application",
+            title="Application update",body=notice,action_path="/applications",
+            email_subject="Your campaign application was updated",email_body=notice)
+    db.commit(); return {"id":a.id,"status":status}
 
 @router.post("/products",status_code=201)
 def create_product(body:ProductCreate,db:Session=Depends(get_db),user:User=Depends(require_role("brand"))):

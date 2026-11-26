@@ -1,6 +1,7 @@
 """Role-scoped creator reward, financial ledger, and admin management APIs."""
 from __future__ import annotations
 from datetime import datetime, timezone
+from uuid import uuid4
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import select, func, or_, and_, case, exists
@@ -14,6 +15,7 @@ from app.models.entities import (Application, AuditLog, BrandProfile, Campaign, 
 from app.schemas.commerce import RewardReviewAction, RewardRuleCreate, RewardRuleUpdate
 from app.security import require_role
 from app.services.referrals import eligible_product_ids
+from app.services.notifications import create_notification
 from app.services.rewards_engine import (approve_reward, cash, record_simulated_payout, reject_reward,
     reverse_reward, rule_scope_key, validate_rule_values)
 
@@ -317,11 +319,22 @@ def _mutate_reward(db:Session,reward_id:int,user:User,action:str,reason:str|None
         elif action=="simulate":
             payout=record_simulated_payout(db,reward,user.id)
             db.add(AuditLog(actor_id=user.id,action="reward.simulated_payout_recorded",entity_type="reward",entity_id=str(reward.id)))
+            notice=f"A simulated payout record for reward {reward.id} was saved in CROWND. No actual money was transferred."
+            create_notification(db,recipient_id=reward.creator_id,event_key=f"simulated-payout:{payout.id}",category="reward",
+                title="Simulated payout recorded",body=notice,action_path="/earnings",
+                email_subject="Simulated payout recorded",email_body=notice)
             db.commit();return {"payout_id":payout.id,"reference":payout.reference,"amount":str(payout.amount),"currency":payout.currency,"disclosure":payout.disclosure,"actual_money_transferred":False}
     except ValueError as exc:
         db.rollback();raise HTTPException(409,str(exc))
     reward.updated_at=datetime.now(timezone.utc)
     db.add(AuditLog(actor_id=user.id,action=f"reward.{action}",entity_type="reward",entity_id=str(reward.id)))
+    descriptions={"approve":"A reward record was approved in CROWND. Approval records platform liability only; no money was transferred.",
+                  "reject":"A reward record was rejected in CROWND. No money was transferred.",
+                  "reverse":"A reward record was reversed in the platform ledger. No refund or money transfer was performed."}
+    notice=f"{descriptions[action]} Reward record {reward.id}."
+    create_notification(db,recipient_id=reward.creator_id,event_key=f"reward-action:{reward.id}:{uuid4().hex}",category="reward",
+        title=f"Reward {action}d" if action!="reject" else "Reward rejected",body=notice,action_path="/earnings",
+        email_subject="Reward status updated",email_body=notice)
     try:db.commit()
     except IntegrityError:db.rollback();raise HTTPException(409,"This reward action has already been processed")
     db.refresh(reward);return _reward_payload(db,reward,include_history=True,include_risk_details=True)
