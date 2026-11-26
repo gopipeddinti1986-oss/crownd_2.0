@@ -117,12 +117,28 @@ Known scope boundaries: ROI/cost-per-conversion are unavailable without actual c
 | Genuine provider adapter and verified settlement | Separate product/security approval, Order/PaymentAttempt records | Future provider adapter, signed webhook routes/config, reconciliation/refund operations | **Intentionally not implemented.** No provider chosen or connected. A later milestone must define signed webhooks, replay/idempotency, capture/refund/partial-refund, reconciliation, and separate handling from DEMO/COD. | Only after explicit approval: signature tamper/replay/idempotency, failure/cancel/refund and staging tests. No current live-money claims. |
 | Attribution persistence | Referral model/cookie policy | Existing `/r/{code}` plus signed attribution cookie in commerce service | **Implemented for checkout continuity:** configured window, signed HttpOnly cookie, verified active creator/published campaign/product compatibility; referral FK stored on order. Consent/privacy/legal review and independent abuse review remain. | Cookie tamper, campaign and product validation, order association tests; expiry boundary/browser E2E follow-up. |
 
-## Phase 7 — Rewards, ledger and payout controls (P0 financial, depends on Phase 4)
+## Deferred workstream — Rewards, ledger and payout controls (P0 financial, depends on Phase 4)
 
 | Task | Dependencies | Files/modules | Acceptance criteria | Testing |
 |---|---|---|---|---|
 | Reward lifecycle worker | Verified paid/refund events | rewards service, worker, migration | Idempotent pending → eligible → approved/paid; cancel/reverse refunds and disputes; campaign limits lock-safe. | Duplicate event, partial refund, budget race and lifecycle tests. |
 | Ledger and payout approval | Reward lifecycle | ledger/payout services/admin routes/UI | Immutable balanced entries, transactional payout reservation and audited admin approve/reject/paid controls; no frontend balance authority. | Ledger invariant, concurrent payout, audit and role tests. |
+
+## Phase 7 — Secure platform administration (implemented locally; not a production-readiness claim)
+
+Audit and implementation record: [`PHASE_7_ADMIN_AUDIT.md`](PHASE_7_ADMIN_AUDIT.md) and [`PHASE_7_ADMIN.md`](PHASE_7_ADMIN.md). This phase extends the Phase 1 auth/session, Phase 4 risk, Phase 5 ledger and Phase 6 campaign systems rather than creating duplicates.
+
+| Milestone | Implementation | Acceptance / verification |
+|---|---|---|
+| 7.1 Lifecycle and restrictions | Bounded admin user search with masked email; reasoned/typed account activation and suspension; transactional session revocation; self-suspension and last-active-admin guards; role mutation prohibited. | Admin-only APIs; existing sessions invalidated; request role injection rejected. |
+| 7.2 Manual verification/moderation | Manual creator/brand status review; constrained campaign moderation with reason and confirmation; legacy admin campaign status route no longer bypasses reasoned moderation. | Uses existing profiles/campaign lifecycle; no external verification claim; audit event for action. |
+| 7.3 Risk and disputes | Existing `ReferralRiskFlag` is the investigation source; human reasons and dispositions; append-only dispute events linked to existing order/conversion/reward records. | No automatic weak-signal ban; dispute operations do not edit conversions, rewards, or ledger. |
+| 7.4 Admin audit and operations UI | Additive `0008_platform_admin`; append-only administrative event history; platform queue counts, bounded search and role-gated responsive operations UI. | API liveness/database probe/integrations stated separately; absent notification/email/Redis health is not fabricated. |
+| 7.5 Verification | Backend role/lifecycle/risk/moderation/dispute/immutability tests; frontend component coverage; SQLite fresh/historical upgrade and downgrade/re-upgrade. | Backend 57 passed; frontend 35 passed; compile, TS, lint/build passed. PostgreSQL, browser E2E, independent security and production review remain unverified. |
+
+## Deferred financial follow-up — Reward lifecycle worker and payout controls
+
+The planned worker, actual payout settlement and refund lifecycle remain future work. Phase 5 already implements rule-based reward generation, simulated payout disclosure, immutable ledger entries, reversal entries, and admin reward review; it does not implement a scheduled eligibility worker, actual payout approval/transfer, gateway refunds or accounting settlement.
 
 ## Phase 8 — Reporting, discovery and trust (P1, depends on validated data)
 
@@ -137,7 +153,7 @@ Known scope boundaries: ROI/cost-per-conversion are unavailable without actual c
 | Task | Dependencies | Files/modules | Acceptance criteria | Testing |
 |---|---|---|---|---|
 | Conversations/notifications/email | Verified users and collaboration | models/routes/services/UI | Persisted authorized conversations, read/unread, preferences; provider abstraction reports disabled mode honestly. | Access, unread state, provider and delivery failure tests. |
-| Admin operations/risk/disputes | Audit log and policy | admin routes/models/UI | Admin account bootstrap safely; review queues and sensitive actions audited and reversible per policy. | Admin-only/other-role denial and audit assertions. |
+| Remaining admin bootstrap/operations gaps | Phase 7 admin foundation | deployment provisioning, notifications, support workflows | Safely provision an initial admin; implement persisted notification/support workflows only when delivery is configured. Phase 7 account controls, risk, disputes and audit are implemented. | Provisioning controls, delivery/access tests; existing Phase 7 checks in `docs/PHASE_7_ADMIN.md`. |
 
 ## Phase 10 — Production readiness (P0 release gate; depends on all P0 work)
 
@@ -154,3 +170,4 @@ Known scope boundaries: ROI/cost-per-conversion are unavailable without actual c
 - **Phase 3 payment options/order lifecycle:** implemented in the current milestone; migration `0004_payment_options`, backend-only no-money Demo Payment, COD unpaid/fulfillment/administrator collection, disabled Online Payment, payment-attempt history, admin order management, audit records, demo-reward non-payability and removal of legacy guest simulator. See `docs/PAYMENT_OPTIONS.md` and `IMPLEMENTATION_STATUS.md` for verified test results and limitations.
 - **Phase 4 (implemented on the current development branch; verified in SQLite/local test environments):** referral attribution and conversion tracking. Reuses existing Referral/Application and commerce/payment records; attribution rules and verification evidence are in `docs/referral-attribution.md`, `docs/REFERRAL_ATTRIBUTION_AUDIT.md`, and `IMPLEMENTATION_STATUS.md`. PostgreSQL migration/concurrency, browser E2E, privacy/legal review, and paid-order refund workflow remain release follow-ups. No production-ready claim is made.
 - **Phase 6 (implemented on the current branch; local verification passed):** campaign management and trusted brand/admin analytics. Backend 53 tests and frontend 32 tests pass; lint/build, SQLite migration coverage, compileall and diff checks passed. Audit, definitions, results and limitations are recorded in `docs/PHASE_6_ANALYTICS_AUDIT.md` and `docs/PHASE_6_ANALYTICS.md`. PostgreSQL and browser E2E remain unverified.
+- **Phase 7 (implemented on the current branch; local verification passed):** secure platform administration, session-revoking restrictions, manual verification and campaign moderation, human risk investigation, disputes with append-only event history, immutable admin audit events and operations UI. Backend 57 tests and frontend 35 tests pass; SQLite migration and local quality checks passed. PostgreSQL, browser E2E and production readiness remain unverified; see `docs/PHASE_7_ADMIN_AUDIT.md` and `docs/PHASE_7_ADMIN.md`.

@@ -1,6 +1,6 @@
 # CROWND implementation status
 
-Updated: 2026-11-25, after Phase 6 campaign lifecycle and analytics implementation. Phase 6 implementation and local verification are recorded below; production readiness is not implied. This checklist is conservative: checked items are implemented and the indicated tests passed; not checked means incomplete or unverified. Detailed task/dependency plan: [`docs/DEVELOPMENT_ROADMAP.md`](docs/DEVELOPMENT_ROADMAP.md).
+Updated: 2026-11-25, after Phase 7 platform administration implementation. Phases 1–7 implementation and local verification are recorded below; production readiness is not implied. This checklist is conservative: checked items are implemented and the indicated tests passed; not checked means incomplete or unverified. Detailed task/dependency plan: [`docs/DEVELOPMENT_ROADMAP.md`](docs/DEVELOPMENT_ROADMAP.md).
 
 ## Verified audit baseline
 
@@ -74,6 +74,17 @@ Updated: 2026-11-25, after Phase 6 campaign lifecycle and analytics implementati
 - [x] Final local verification: backend **53 passed**; frontend **32 passed**, lint and production build passed; compileall, SQLite fresh/historical migration paths, and `git diff --check` passed. One upstream Starlette/httpx deprecation warning; Vite notes a ~835 kB minified chunk, and Recharts warns about zero-size jsdom containers.
 - [ ] PostgreSQL migration and production query behavior, browser E2E, real payment/refund behavior, external financial settlement and legal/privacy review are not verified. See [`docs/PHASE_6_ANALYTICS.md`](docs/PHASE_6_ANALYTICS.md) for definitions and limitations.
 
+### Phase 7 — Secure platform administration (implemented; local verification passed)
+
+- [x] Audited the pre-Phase 7 codebase and committed [`docs/PHASE_7_ADMIN_AUDIT.md`](docs/PHASE_7_ADMIN_AUDIT.md) before implementation.
+- [x] Added searchable, paginated admin account listing with masked email; reasoned/confirmed activate/suspend; blocks self-suspension and last-active-admin suspension; revokes all active sessions transactionally; does not permit role changes or account deletion.
+- [x] Added manual creator/brand verification, reasoned campaign moderation with constrained transitions, and routed admin campaign state changes away from the legacy no-reason endpoint.
+- [x] Reused existing explainable referral risk flags, added reasoned human dispositions in admin audit history, and integrated risk review into platform operations; no automatic ban or financial action is triggered.
+- [x] Added dispute cases/events for order/conversion/reward investigations; dispute status changes preserve append-only financial history and never imply a refund or ledger mutation.
+- [x] Added append-only admin audit events and database/ORM update-delete guards for current and legacy audit logs; created admin operations overview, queue search, honest API/database/integration health labels, and responsive role-gated UI.
+- [x] Additive migration `0008_platform_admin`; fresh/historical SQLite upgrade, downgrade/re-upgrade and append-only trigger rejection tested. Backend **57 passed**; frontend **35 passed**, TypeScript, ESLint, Vite build and Python compileall passed.
+- [ ] PostgreSQL, browser E2E/accessibility, production operations, independent security review, external identity verification and notification/email/Redis delivery remain unverified or out of scope. No production-ready claim.
+
 ## In progress / partial
 
 - [ ] Auth is significantly safer but not independently security-audited. Rate limit is IP-based; no MFA, persistent login-failure scoring, account lockout, device/session listing, signed email provider callbacks, or session-management UI.
@@ -95,7 +106,7 @@ Updated: 2026-11-25, after Phase 6 campaign lifecycle and analytics implementati
 - [ ] Reward lifecycle worker and immutable balanced ledger, payout admin approval/reconciliation.
 - [ ] Complete creator/brand profiles, social evidence, portfolio uploads, brand verification, invitations/collaboration/deliverables.
 - [ ] Messaging, persisted notifications and production email preferences/delivery monitoring.
-- [ ] Admin bootstrap and full admin controls/risk/disputes/audit history remain incomplete; Phase 3 adds admin order search/filter/detail, audited status changes, cancellation, and COD collection confirmation.
+- [x] Phase 7 adds backend-enforced admin lifecycle/restrictions, manual creator/brand verification, campaign moderation, explainable risk review, append-only audit history, dispute cases, operations dashboard/search and the admin UI. Admin bootstrap, notification delivery, external verification and production operations remain incomplete; Phase 3 order controls remain as previously described.
 - [ ] Redis included/managed for production deployment; production secret manager, TLS, backups, observability and hardened runtime.
 - [ ] Playwright end-to-end workflows, multi-worker/security/load testing, independent security review and CI release gates.
 

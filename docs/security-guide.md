@@ -11,6 +11,10 @@
 - Cookie endpoints enforce trusted `Origin`; CORS is credentialed but explicitly allowlisted. Production rejects weak/default JWT secrets, insecure cookies, wildcard/non-HTTPS origins, mismatched frontend origin, disabled email, non-TLS SMTP and SQLite.
 - Auth responses use `Cache-Control: no-store`; unexpected errors return a generic body and safe logs contain only exception type and route path. Email delivery errors omit recipient, message, SMTP response and token. Email token URLs place credentials in URL fragments, not query parameters.
 - ORM parameterization, role dependencies and existing route ownership checks remain active.
+- Phase 7 admin account restrictions are backend-authorized, require a reason and typed confirmation, block self/last-active-admin suspension, prohibit role changes, and revoke active sessions. Admin account lists mask email addresses.
+- Phase 7 creator/brand status is explicitly manual review only. Campaign moderation, risk dispositions and dispute state changes are reasoned and audited. Risk signals do not automatically ban users or change financial records.
+- `AdminAuditEvent`, `AdminDisputeEvent`, and legacy `AuditLog` are append-only in the ORM and protected by SQLite/PostgreSQL update/delete triggers after migration `0008_platform_admin`. Dispute cases/events are operational records and do not edit immutable financial history.
+- Admin health reports only the database query it actually probes; external email/Redis health is not probed, payments/payout transfers are not integrated, and notification delivery is unavailable rather than represented as healthy.
 
 ## Configure production
 
