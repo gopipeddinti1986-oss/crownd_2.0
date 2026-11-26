@@ -1,6 +1,12 @@
 # CROWND 2.0 — Verified audit and development roadmap
 
-Audit date: 2026-11-25. Audited current branch source and ran `git status`, branch/log/remote inspection. Phase 9 local QA has since been completed with limitations documented below and in `docs/PHASE_9_TEST_RESULTS.md`; this roadmap supersedes estimates in the earlier status note; items marked implemented are verified in source only where explicitly described.
+Audit date: 2026-11-25. This roadmap preserves the historical Phase 1–9 audit below and now includes Phase 10 completion and Phase 11 execution evidence. Phase 10 is committed at `1cda7d3`. Phase 11 found no Docker/container runtime, PostgreSQL client/server tools, `age`, or runnable browser; a disposable SQLite API/Vite/worker smoke passed, but it does not validate PostgreSQL or Compose. An existing connected Supabase PostgreSQL project was observed via metadata only and was not used because it is not confirmed isolated. Exact evidence and blockers are in `docs/PHASE_11_INFRASTRUCTURE_VALIDATION.md`, `docs/PHASE_11_VALIDATION_RESULTS.md`, and `docs/PHASE_11_HOSTING_EVALUATION.md`. This roadmap does not claim production readiness.
+
+## Latest infrastructure phase status
+
+- **Phase 10:** hardening and release documentation completed and pushed (`1cda7d3`). Local tests and dependency audits passed as documented; Docker/PostgreSQL/backup-restore/SMTP/browser/deployment checks were explicitly not run then.
+- **Phase 11:** initial execution attempted. Debian 12 sandbox has no Docker/Compose/alternative runtime or PostgreSQL tools; no system packages were installed. Fresh Alembic migration on a newly created disposable SQLite DB reached `0009_notifications`; host-run FastAPI/Vite health and seeded brand login returned HTTP 200; worker disabled-provider suppression, heartbeat, graceful stop and restart passed against that SQLite DB. Playwright Chromium could not start due missing `libnspr4.so`; no E2E workflow ran. Supabase connector metadata showed a healthy PostgreSQL 17 service and existing CROWND-labelled SQL migration history, but the project is not confirmed disposable and was not modified.
+- **Current release assessment:** infrastructure validation incomplete; no provider selected, account/plan/credentials provisioned, backup/restore rehearsal, SMTP relay test, browser E2E, staging deployment or production smoke test. Ask for an explicitly isolated PostgreSQL target and approved Docker/browser-capable runner before mutating external infrastructure.
 
 ## Repository audit: findings
 

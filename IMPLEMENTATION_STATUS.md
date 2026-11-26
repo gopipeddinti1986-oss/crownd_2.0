@@ -1,6 +1,15 @@
 # CROWND implementation status
 
-Updated: 2026-11-25, after Phase 9 system-wide local QA and defect regressions. Phases 1–9 implementation/verification records and limitations are recorded below; production readiness is not implied. This checklist is conservative: checked items are implemented and the indicated tests passed; not checked means incomplete or unverified. Detailed task/dependency plan: [`docs/DEVELOPMENT_ROADMAP.md`](docs/DEVELOPMENT_ROADMAP.md).
+Updated: 2026-11-25, after Phase 11 infrastructure feasibility and isolated local-runtime checks. Phase 10 hardening is committed as `1cda7d3`; Phase 11 remains in progress and is infrastructure-blocked. No production readiness is implied. This checklist is conservative: checked items are implemented and the indicated tests passed; not checked means incomplete or unverified. Detailed task/dependency plan: [`docs/DEVELOPMENT_ROADMAP.md`](docs/DEVELOPMENT_ROADMAP.md).
+
+## Latest Phase 10/11 status (2026-11-25)
+
+- Phase 10 completed and pushed at `1cda7d3996c680f08d94aa79938b841d31a6cc56`. Its backend 74 tests, frontend 38 tests, lint/build, dependency audits and static checks are historical local validation; see [`docs/PHASE_10_DEPLOYMENT_AUDIT.md`](docs/PHASE_10_DEPLOYMENT_AUDIT.md).
+- Phase 11 started from a clean worktree on `arena/e6c9b4f7-crownd-2-0`. Docker/Compose, Podman/nerdctl and container daemon sockets are absent. Docker was not installed; the environment is Debian 12 with no configured apt sources, and no Docker/OS package access is allowed by the current environment.
+- No local PostgreSQL server/client tools, `pg_dump`, `pg_restore`, `age`, or browser binaries are installed. A Playwright/Chromium feasibility probe failed to launch Chromium because `libnspr4.so` is absent; no E2E ran.
+- A disposable `/tmp` SQLite database migrated fresh through Alembic `0009_notifications`, was seeded with local demo data, and was used for host-process API/Vite HTTP smoke tests. Readiness, liveness, SPA and seeded brand login returned HTTP 200. A separate worker processed one fake outbox row as `suppressed/provider_disabled`; actual worker heartbeat, SIGTERM cleanup and process restart were exercised. These are SQLite/host-process checks, not PostgreSQL/Compose evidence.
+- The connected Supabase integration reports one existing healthy PostgreSQL 17 project and existing CROWND-labelled SQL migration metadata, with no listed database branches. Only metadata/health was read; no SQL, customer records, secrets, migration or deployment was touched. It is not a confirmed isolated test target and cannot be used for mutating validation without explicit confirmation/authorization.
+- No Docker image build, PostgreSQL application connection/migration/concurrency test, encrypted DB backup/restore, live SMTP, browser E2E, public deployment or production smoke test has occurred. Phase 11 evidence and blockers: [`docs/PHASE_11_INFRASTRUCTURE_VALIDATION.md`](docs/PHASE_11_INFRASTRUCTURE_VALIDATION.md), [`docs/PHASE_11_VALIDATION_RESULTS.md`](docs/PHASE_11_VALIDATION_RESULTS.md), [`docs/PHASE_11_HOSTING_EVALUATION.md`](docs/PHASE_11_HOSTING_EVALUATION.md).
 
 ## Verified audit baseline
 
@@ -178,4 +187,4 @@ The following sections preserve earlier Phase 1/2 records from their milestones.
 - `EMAIL_MODE=disabled` is safe but means no verification/reset email is sent and new accounts cannot log in until SMTP is configured. The local Compose Mailpit sink is not an external sender.
 - Never deploy with `APP_ENV=development`, default JWT key, demo seed credentials, or memory-only rate limits. DEMO is a local simulation and is not a real payment capability.
 - Existing initial migration `0001` dynamically invokes current ORM metadata; `0002` is conditional to accommodate that history. Validate backups and reviewed upgrade/rollback on a copy of each external database before deployment.
-- No live payment provider, production payout rail, external email account or managed production service is configured. CROWND is not production-ready.
+- No live payment provider, production payout rail, or external email account is configured. An existing Supabase PostgreSQL project was observed via metadata only, but it is not confirmed as CROWND's isolated test/staging target and was not used or modified. No CROWND service was deployed there. CROWND is not production-ready.
