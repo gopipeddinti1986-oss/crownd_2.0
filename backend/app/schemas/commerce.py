@@ -1,4 +1,5 @@
 from decimal import Decimal
+from datetime import datetime
 from typing import Literal
 import re
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
@@ -76,6 +77,59 @@ class ProductOut(BaseModel):
     image_urls: list[str]
     specifications: dict[str, str]
     brand: dict
+
+class CampaignCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    title: str = Field(min_length=2, max_length=180)
+    product_id: int | None = Field(default=None, gt=0)
+    product_ids: list[int] = Field(default_factory=list, max_length=50)
+    description: str = Field(default="", max_length=10000)
+    category: str = Field(default="Lifestyle", min_length=2, max_length=80)
+    platforms: str = Field(default="Instagram", max_length=200)
+    reward_model: str = Field(default="percentage", pattern=r"^(percentage|fixed)$")
+    reward_rate: Decimal = Field(default=Decimal("10"), ge=0, max_digits=7, decimal_places=3)
+    budget: Decimal = Field(default=Decimal("0"), ge=0, max_digits=12, decimal_places=2)
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+
+    @field_validator("product_ids")
+    @classmethod
+    def unique_campaign_products(cls, value: list[int]) -> list[int]:
+        if any(item <= 0 for item in value) or len(value) != len(set(value)):
+            raise ValueError("Product IDs must be positive and unique")
+        return value
+
+    @field_validator("ends_at")
+    @classmethod
+    def end_after_start(cls, value, info):
+        start = info.data.get("starts_at")
+        if value and start and value <= start:
+            raise ValueError("Campaign end must follow its start")
+        return value
+
+class ReferralLinkCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    campaign_id: int = Field(gt=0)
+    product_id: int | None = Field(default=None, gt=0)
+
+class ReferralLinkUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    active: bool
+
+class CampaignProductsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    product_ids: list[int] = Field(min_length=1, max_length=50)
+
+    @field_validator("product_ids")
+    @classmethod
+    def unique_products(cls, value: list[int]) -> list[int]:
+        if any(item <= 0 for item in value) or len(value) != len(set(value)):
+            raise ValueError("Product IDs must be positive and unique")
+        return value
+
+class ReferralRiskReview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: str = Field(pattern=r"^(reviewed|dismissed)$")
 
 class OrderStatusUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")

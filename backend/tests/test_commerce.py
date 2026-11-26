@@ -2,13 +2,13 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from fastapi.testclient import TestClient
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, func
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from app.api.v1.auth import limiter
 from app.database import Base, get_db
 from app.main import app
-from app.models.entities import BrandProfile, Campaign, Cart, CartItem, Order, OrderItem, PaymentAttempt, Product, Referral, Reward, User
+from app.models.entities import Application, BrandProfile, Campaign, CampaignProduct, Cart, CartItem, Click, Conversion, ConversionEvent, Order, OrderItem, PaymentAttempt, Product, Referral, ReferralActivity, ReferralRiskFlag, Reward, User, VisitorAttribution
 from app.core.config import settings
 from app.security import create_access_token, hash_password
 from app.services.auth import create_session
@@ -169,6 +169,7 @@ def test_referral_cookie_attribution_is_signed_and_validated_at_checkout(commerc
         campaign = Campaign(brand_id=brand, product_id=product_id, title="Ritual", slug="ritual", description="", category="Beauty", platforms="Instagram", reward_model="percentage", reward_rate=Decimal("10"), budget=Decimal("1000"), status="published")
         db.add(campaign)
         db.flush()
+        db.add(Application(campaign_id=campaign.id, creator_id=creator_id, status="accepted"))
         referral = Referral(campaign_id=campaign.id, creator_id=creator_id, code="JULES10", active=True)
         db.add(referral)
         db.commit()
@@ -188,6 +189,7 @@ def test_referral_cookie_attribution_is_signed_and_validated_at_checkout(commerc
     assert commerce_client.post("/api/v1/payouts", headers=creator_headers).status_code == 409
     # Tampering with the attribution cookie cannot assign an arbitrary referral.
     commerce_client.cookies.set("crownd_referral", "1.9999999999.forged")
+    commerce_client.cookies.set("crownd_attribution", "forged.visitor.signature")
     assert add_to_cart(commerce_client, customer_headers, product_id).status_code == 201
     uncredited = commerce_client.post("/api/v1/checkout", headers={**customer_headers, "Idempotency-Key": "tampered-referral-001"}, json={**address(), "payment_method": "cod"})
     assert uncredited.status_code == 201 and uncredited.json()["referral"] is None
@@ -332,6 +334,7 @@ def test_cod_referral_reward_is_created_only_after_admin_collection(commerce_db,
         campaign = Campaign(brand_id=brand, product_id=product_id, title="COD Campaign", slug="cod-campaign", description="", category="Beauty", platforms="Instagram", reward_model="percentage", reward_rate=Decimal("10"), budget=Decimal("500"), status="published")
         db.add(campaign)
         db.flush()
+        db.add(Application(campaign_id=campaign.id, creator_id=creator_id, status="accepted"))
         referral = Referral(campaign_id=campaign.id, creator_id=creator_id, code="CODCREATOR", active=True)
         db.add(referral)
         db.commit()
@@ -349,3 +352,198 @@ def test_cod_referral_reward_is_created_only_after_admin_collection(commerce_db,
         assert reward and reward.creator_id == creator_id and reward.is_demo is False and reward.status == "pending"
     creator_rewards = commerce_client.get("/api/v1/rewards/me", headers=creator).json()
     assert len(creator_rewards) == 1 and creator_rewards[0]["is_demo"] is False and creator_rewards[0]["payable"] is False
+
+
+def test_phase4_referral_link_click_mixed_cart_conversion_and_creator_analytics(commerce_db, commerce_client):
+    brand_id, brand = create_account(commerce_db, "Noya", "phase4-brand@example.com", "brand")
+    other_brand_id, other_brand = create_account(commerce_db, "Other", "phase4-other@example.com", "brand")
+    creator_id, creator = create_account(commerce_db, "Jules Lane", "phase4-creator@example.com", "creator")
+    customer_id, customer = create_account(commerce_db, "Customer", "phase4-customer@example.com", "customer")
+    _admin_id, admin = create_account(commerce_db, "Admin", "phase4-admin@example.com", "admin")
+    eligible_product = create_product(commerce_db, brand_id, sale_price=None, stock=5)
+    unrelated_product = create_product(commerce_db, other_brand_id, sale_price=None, stock=5)
+    campaign = commerce_client.post("/api/v1/campaigns", headers=brand, json={"title": "Spring Creator Edit", "product_ids": [eligible_product], "reward_rate": "10", "budget": "500"})
+    assert campaign.status_code == 201
+    campaign_id = campaign.json()["id"]
+    assert commerce_client.patch(f"/api/v1/campaigns/{campaign_id}/status", headers=brand, json={"status": "published"}).status_code == 200
+    application = commerce_client.post(f"/api/v1/campaigns/{campaign_id}/applications", headers=creator, json={"message": "Approved partner"})
+    assert application.status_code == 201
+    assert commerce_client.patch(f"/api/v1/applications/{application.json()['id']}", headers=brand, json={"status": "accepted"}).status_code == 200
+    unapproved = create_account(commerce_db, "Unapproved", "phase4-unapproved@example.com", "creator")[1]
+    assert commerce_client.post("/api/v1/referrals/links", headers=unapproved, json={"campaign_id": campaign_id}).status_code == 403
+    assert commerce_client.post("/api/v1/referrals/links", headers=creator, json={"campaign_id": campaign_id, "product_id": unrelated_product}).status_code == 422
+    generated = commerce_client.post("/api/v1/referrals/links", headers=creator, json={"campaign_id": campaign_id})
+    assert generated.status_code == 201
+    link = generated.json()
+    assert link["creator_id"] == creator_id and link["campaign_id"] == campaign_id and link["code"]
+    assert link["url"] == f"/r/{link['code']}"
+    tracked = commerce_client.get(f"/api/v1/r/{link['code']}", headers={"referer": "https://social.example/post?private=1"})
+    assert tracked.status_code == 200 and tracked.json()["destination"] == f"/shop?campaign_id={campaign_id}"
+    assert "crownd_attribution=" in tracked.headers["set-cookie"]
+    assert commerce_client.get(f"/api/v1/products/{eligible_product}").status_code == 200
+    assert add_to_cart(commerce_client, customer, eligible_product).status_code == 201
+    assert add_to_cart(commerce_client, customer, unrelated_product).status_code == 201
+    order_response = commerce_client.post("/api/v1/checkout", headers={**customer, "Idempotency-Key": "phase4-mixed-demo-order"}, json={**address(), "payment_method": "demo"})
+    assert order_response.status_code == 201
+    assert order_response.json()["conversion"]["status"] == "confirmed"
+    assert order_response.json()["conversion"]["is_demo"] is True
+    with commerce_db() as db:
+        stored = db.scalar(select(Order).where(Order.customer_id == customer_id))
+        conversion = db.scalar(select(Conversion).where(Conversion.order_id == stored.id))
+        items = db.scalars(select(OrderItem).where(OrderItem.order_id == stored.id).order_by(OrderItem.id)).all()
+        assert conversion and conversion.creator_id == creator_id and conversion.campaign_id == campaign_id
+        assert conversion.attributed_amount == Decimal("100.00")
+        assert len(items) == 2 and sum(item.referral_id is not None for item in items) == 1
+        assert db.scalar(select(func.count(Conversion.id)).where(Conversion.order_id == stored.id)) == 1
+        assert db.scalar(select(func.count(ConversionEvent.id)).where(ConversionEvent.conversion_id == conversion.id)) == 2
+        click = db.scalar(select(Click).where(Click.referral_id == conversion.referral_id))
+        assert click.session_hash and len(click.session_hash) == 64
+        assert click.referrer_origin == "social.example" and "private" not in (click.referrer_origin or "")
+        assert db.scalar(select(func.count(ReferralActivity.id)).where(ReferralActivity.event_type == "product_view")) == 1
+        demo_reward = db.scalar(select(Reward).where(Reward.order_id == stored.id))
+        assert demo_reward and demo_reward.is_demo and demo_reward.amount == Decimal("10.00")
+    metrics = commerce_client.get("/api/v1/creator/referral-analytics", headers=creator).json()["metrics"]
+    assert metrics["clicks"] == 1 and metrics["unique_visitors"] == 1
+    assert metrics["product_views"] == 1 and metrics["cart_additions"] == 1
+    assert metrics["orders"] == 1 and metrics["confirmed_conversions"] == 1 and metrics["demo_conversions"] == 1
+    creator_metrics=commerce_client.get(f"/api/v1/creator/referral-analytics?campaign_id={campaign_id}&product_id={eligible_product}&referral_id={link['id']}",headers=creator)
+    assert creator_metrics.status_code==200 and creator_metrics.json()["metrics"]["confirmed_conversions"]==1
+    creator_items=commerce_client.get(f"/api/v1/creator/conversions?campaign_id={campaign_id}&product_id={eligible_product}&referral_id={link['id']}",headers=creator)
+    assert creator_items.status_code==200 and creator_items.json()["total"]==1
+    assert "customer_email" not in creator_items.json()["items"][0] and "customer_id" not in creator_items.json()["items"][0]
+    brand_metrics=commerce_client.get(f"/api/v1/brand/campaign-analytics/{campaign_id}?product_id={eligible_product}",headers=brand)
+    assert brand_metrics.status_code==200 and brand_metrics.json()["metrics"]["confirmed_conversions"]==1
+    admin_items=commerce_client.get(f"/api/v1/admin/conversions?q={link['code']}&creator_id={creator_id}&campaign_id={campaign_id}&product_id={eligible_product}",headers=admin)
+    assert admin_items.status_code==200 and admin_items.json()["total"]==1
+    admin_links=commerce_client.get(f"/api/v1/admin/referrals?creator_id={creator_id}&campaign_id={campaign_id}&product_id={eligible_product}",headers=admin)
+    assert admin_links.status_code==200 and admin_links.json()["total"]==1
+    assert commerce_client.get("/api/v1/creator/conversions", headers=creator).json()["total"] == 1
+    replay = commerce_client.post("/api/v1/checkout", headers={**customer, "Idempotency-Key": "phase4-mixed-demo-order"}, json={**address(), "payment_method": "demo"})
+    assert replay.status_code == 200
+    with commerce_db() as db:
+        assert db.scalar(select(func.count(Conversion.id))) == 1
+    assert commerce_client.get("/api/v1/admin/referrals", headers=creator).status_code == 403
+
+
+def test_phase4_cod_conversion_confirmed_only_after_collection_and_cancelled_history(commerce_db, commerce_client):
+    brand_id, brand = create_account(commerce_db, "Noya", "cod-phase4-brand@example.com", "brand")
+    _creator_id, creator = create_account(commerce_db, "Creator", "cod-phase4-creator@example.com", "creator")
+    customer_id, customer = create_account(commerce_db, "Buyer", "cod-phase4-buyer@example.com", "customer")
+    _admin_id, admin = create_account(commerce_db, "Admin", "cod-phase4-admin@example.com", "admin")
+    product_id = create_product(commerce_db, brand_id, sale_price=None, stock=5)
+    campaign = commerce_client.post("/api/v1/campaigns", headers=brand, json={"title": "COD Referral Campaign", "product_id": product_id, "reward_rate": "10", "budget": "1000"}).json()
+    commerce_client.patch(f"/api/v1/campaigns/{campaign['id']}/status", headers=brand, json={"status": "published"})
+    app = commerce_client.post(f"/api/v1/campaigns/{campaign['id']}/applications", headers=creator, json={}).json()
+    commerce_client.patch(f"/api/v1/applications/{app['id']}", headers=brand, json={"status": "accepted"})
+    link = commerce_client.post("/api/v1/referrals/links", headers=creator, json={"campaign_id": campaign["id"]}).json()
+    commerce_client.get(f"/api/v1/r/{link['code']}")
+    add_to_cart(commerce_client, customer, product_id)
+    pending = commerce_client.post("/api/v1/checkout", headers={**customer, "Idempotency-Key": "phase4-cod-pending-001"}, json={**address(), "payment_method": "cod"})
+    assert pending.status_code == 201 and pending.json()["conversion"]["status"] == "pending"
+    with commerce_db() as db:
+        order = db.scalar(select(Order).where(Order.customer_id == customer_id, Order.payment_method == "cod"))
+        assert db.scalar(select(Reward.id).where(Reward.order_id == order.id)) is None
+    for status in ("processing", "shipped", "delivered"):
+        assert commerce_client.patch(f"/api/v1/orders/{pending.json()['id']}/status", headers=admin, json={"status": status}).status_code == 200
+    assert commerce_client.post(f"/api/v1/admin/orders/{pending.json()['id']}/collect-payment", headers=admin).status_code == 200
+    assert commerce_client.post(f"/api/v1/admin/orders/{pending.json()['id']}/collect-payment", headers=admin).status_code == 409
+    with commerce_db() as db:
+        order = db.scalar(select(Order).where(Order.customer_id == customer_id, Order.payment_method == "cod"))
+        conversion = db.scalar(select(Conversion).where(Conversion.order_id == order.id))
+        reward = db.scalar(select(Reward).where(Reward.order_id == order.id))
+        assert conversion.status == "confirmed" and conversion.is_demo is False
+        assert reward and reward.is_demo is False and reward.status == "pending"
+        assert db.scalar(select(func.count(ConversionEvent.id)).where(ConversionEvent.conversion_id == conversion.id)) == 2
+    assert commerce_client.post(f"/api/v1/orders/{pending.json()['id']}/cancel", headers=customer).status_code == 409
+
+    commerce_client.get(f"/api/v1/r/{link['code']}")
+    add_to_cart(commerce_client, customer, product_id)
+    cancelled = commerce_client.post("/api/v1/checkout", headers={**customer, "Idempotency-Key": "phase4-cod-cancel-001"}, json={**address(), "payment_method": "cod"})
+    assert cancelled.status_code == 201 and cancelled.json()["conversion"]["status"] == "pending"
+    assert commerce_client.post(f"/api/v1/orders/{cancelled.json()['id']}/cancel", headers=customer).status_code == 200
+    with commerce_db() as db:
+        order = db.scalar(select(Order).where(Order.idempotency_key == "phase4-cod-cancel-001"))
+        conversion = db.scalar(select(Conversion).where(Conversion.order_id == order.id))
+        assert conversion.status == "cancelled"
+        assert db.scalar(select(func.count(ConversionEvent.id)).where(ConversionEvent.conversion_id == conversion.id)) == 2
+        assert db.scalar(select(Reward.id).where(Reward.order_id == order.id)) is None
+
+
+def test_phase4_link_deactivation_invalidates_click_and_preserves_history(commerce_db, commerce_client):
+    brand_id, brand = create_account(commerce_db, "Brand", "deactivate-brand@example.com", "brand")
+    _creator_id, creator = create_account(commerce_db, "Creator", "deactivate-creator@example.com", "creator")
+    product_id = create_product(commerce_db, brand_id)
+    campaign = commerce_client.post("/api/v1/campaigns", headers=brand, json={"title": "Deactivation campaign", "product_id": product_id}).json()
+    commerce_client.patch(f"/api/v1/campaigns/{campaign['id']}/status", headers=brand, json={"status": "published"})
+    application = commerce_client.post(f"/api/v1/campaigns/{campaign['id']}/applications", headers=creator, json={}).json()
+    commerce_client.patch(f"/api/v1/applications/{application['id']}", headers=brand, json={"status": "accepted"})
+    link = commerce_client.post("/api/v1/referrals/links", headers=creator, json={"campaign_id": campaign["id"]}).json()
+    assert commerce_client.get(f"/api/v1/r/{link['code']}").status_code == 200
+    assert commerce_client.patch(f"/api/v1/referrals/links/{link['id']}", headers=brand, json={"active": False}).status_code == 403
+    assert commerce_client.patch(f"/api/v1/referrals/links/{link['id']}", headers=creator, json={"active": False}).status_code == 200
+    assert commerce_client.get(f"/api/v1/r/{link['code']}").status_code == 410
+    with commerce_db() as db:
+        assert db.scalar(select(Referral).where(Referral.id == link["id"])).active is False
+        assert db.scalar(select(func.count(Click.id)).where(Click.referral_id == link["id"])) == 2
+
+
+def test_phase4_last_valid_referral_replaces_touch_without_direct_traffic_erasing_it(commerce_db, commerce_client):
+    brand_id, brand = create_account(commerce_db, "Brand", "touch-brand@example.com", "brand")
+    _creator_id, creator = create_account(commerce_db, "Creator", "touch-creator@example.com", "creator")
+    _customer_id, customer = create_account(commerce_db, "Buyer", "touch-customer@example.com", "customer")
+    product_one = create_product(commerce_db, brand_id, sale_price=None, stock=3)
+    product_two = create_product(commerce_db, brand_id, name="Second Serum", slug="second-serum", sale_price=None, stock=3)
+    links=[]
+    for index,product_id in enumerate((product_one,product_two),start=1):
+        campaign=commerce_client.post("/api/v1/campaigns",headers=brand,json={"title":f"Touch Campaign {index}","product_id":product_id}).json()
+        commerce_client.patch(f"/api/v1/campaigns/{campaign['id']}/status",headers=brand,json={"status":"published"})
+        application=commerce_client.post(f"/api/v1/campaigns/{campaign['id']}/applications",headers=creator,json={}).json()
+        commerce_client.patch(f"/api/v1/applications/{application['id']}",headers=brand,json={"status":"accepted"})
+        links.append(commerce_client.post("/api/v1/referrals/links",headers=creator,json={"campaign_id":campaign["id"]}).json())
+    assert commerce_client.get(f"/api/v1/r/{links[0]['code']}").status_code == 200
+    with commerce_db() as db:
+        first_ref=db.scalar(select(Referral).where(Referral.id==links[0]["id"]))
+        state=db.scalar(select(VisitorAttribution))
+        first_hash=state.visitor_hash
+        first_touch=state.first_touch_at
+        assert state.first_referral_id==first_ref.id and state.last_referral_id==first_ref.id
+    # Direct navigation, product views and cart activity do not erase or replace last touch.
+    assert commerce_client.get(f"/api/v1/products/{product_one}").status_code==200
+    assert commerce_client.get(f"/api/v1/r/{links[1]['code']}").status_code==200
+    with commerce_db() as db:
+        state=db.scalar(select(VisitorAttribution).where(VisitorAttribution.visitor_hash==first_hash))
+        assert state.first_referral_id==links[0]["id"]
+        assert state.last_referral_id==links[1]["id"]
+        assert state.first_touch_at==first_touch
+    add_to_cart(commerce_client,customer,product_two)
+    order=commerce_client.post("/api/v1/checkout",headers={**customer,"Idempotency-Key":"phase4-last-touch-001"},json={**address(),"payment_method":"cod"})
+    assert order.status_code==201 and order.json()["referral"]["code"]==links[1]["code"]
+    with commerce_db() as db:
+        stored=db.scalar(select(Order).where(Order.idempotency_key=="phase4-last-touch-001"))
+        item=db.scalar(select(OrderItem).where(OrderItem.order_id==stored.id))
+        conversion=db.scalar(select(Conversion).where(Conversion.order_id==stored.id))
+        state=db.scalar(select(VisitorAttribution).where(VisitorAttribution.visitor_hash==first_hash))
+        assert stored.referral_id==links[1]["id"] and item.referral_id==links[1]["id"]
+        assert conversion.status=="pending" and conversion.referral_id==links[1]["id"]
+        assert state.customer_id is not None
+
+
+def test_phase4_self_referral_is_ineligible_and_flagged(commerce_db):
+    from app.services.conversions import create_conversion
+    brand_id,_brand=create_account(commerce_db,"Brand","self-brand@example.com","brand")
+    creator_id,creator_headers=create_account(commerce_db,"Creator","self-creator@example.com","creator")
+    product_id=create_product(commerce_db,brand_id)
+    with commerce_db() as db:
+        campaign=Campaign(brand_id=brand_id,product_id=product_id,title="Self referral",slug="self-referral",status="published")
+        db.add(campaign);db.flush()
+        db.add(Application(campaign_id=campaign.id,creator_id=creator_id,status="accepted"))
+        referral=Referral(campaign_id=campaign.id,creator_id=creator_id,code="SELFTEST",active=True)
+        db.add(referral)
+        db.flush()
+        order=Order(public_id="CR-SELFTEST001",customer_name="Creator",customer_email="self-creator@example.com",customer_id=creator_id,product_id=product_id,quantity=1,amount=Decimal("100.00"),currency="INR",payment_method="demo",payment_status="paid",status="confirmed")
+        db.add(order);db.flush()
+        conversion=create_conversion(db,order,referral,visitor_hash="a"*64,attributed_amount=Decimal("100.00"),eligible_product_count=1,customer=db.get(User,creator_id))
+        db.commit()
+        assert conversion.status=="ineligible" and conversion.reason=="self_referral" and conversion.attributed_amount==Decimal("0.00")
+        assert db.scalar(select(ReferralRiskFlag).where(ReferralRiskFlag.risk_code=="SELF_REFERRAL")) is not None
+        assert db.scalar(select(Reward).where(Reward.order_id==order.id)) is None

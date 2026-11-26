@@ -1,6 +1,6 @@
 # CROWND implementation status
 
-Updated: 2026-11-25, after Phase 3 payment-option and order-lifecycle implementation/verification. This checklist is conservative: checked items are implemented and the indicated tests passed; not checked means incomplete or unverified. Detailed task/dependency plan: [`docs/DEVELOPMENT_ROADMAP.md`](docs/DEVELOPMENT_ROADMAP.md).
+Updated: 2026-11-25, after Phase 4 referral-attribution implementation and verification. Phase 4 is implemented on the current development branch; this does not imply production readiness. This checklist is conservative: checked items are implemented and the indicated tests passed; not checked means incomplete or unverified. Detailed task/dependency plan: [`docs/DEVELOPMENT_ROADMAP.md`](docs/DEVELOPMENT_ROADMAP.md).
 
 ## Verified audit baseline
 
@@ -54,10 +54,15 @@ Updated: 2026-11-25, after Phase 3 payment-option and order-lifecycle implementa
 - [x] Inventory decrement/restoration is guarded for checkout, demo failure, and eligible cancellation; delivered orders cannot be cancelled. Fulfillment state changes are admin-only, transition-checked and audit-logged.
 - [x] Admin order search/filter/detail foundation and payment attempt visibility are available. Customer order details show payment method/status/reference; demo referral rewards are marked non-payable, while COD referral rewards are created after collection.
 
-### Phase 4 — Referral attribution and conversion engine (in progress)
+### Phase 4 — Referral attribution and conversion engine (implemented; local verification passed)
 
-- [x] Baseline code audit completed and captured in [`docs/REFERRAL_ATTRIBUTION_AUDIT.md`](docs/REFERRAL_ATTRIBUTION_AUDIT.md), including the incremental acceptance plan and explicit baseline risks.
-- [ ] Referral link management, click/visitor attribution, item-level conversion lifecycle, risk flags, role-scoped analytics/UI, and migration/tests are pending implementation and verification. Do not claim Phase 4 complete yet.
+- [x] Baseline audit, implementation decisions, and remaining risks are recorded in [`docs/REFERRAL_ATTRIBUTION_AUDIT.md`](docs/REFERRAL_ATTRIBUTION_AUDIT.md) and [`docs/referral-attribution.md`](docs/referral-attribution.md).
+- [x] Reused `Referral`/`Application`; added additive migration `0005_referral_attribution`, campaign-product eligibility, signed durable first/last touch, creator link management, click/activity records, line-level order attribution, and order-unique conversion/event records.
+- [x] Eligibility is backend-derived at click and checkout, including campaign dates/status, accepted participation, creator/brand/link state and product eligibility. Last eligible referral wins within the configured window; direct navigation does not erase it. Mixed carts only credit eligible lines.
+- [x] Conversion/reward state uses payment lifecycle: Demo is marked simulated; COD remains pending until admin collection; eligible unpaid cancellation is recorded; duplicate conversions/reward paths are guarded; self-referrals are ineligible with explainable review flags.
+- [x] Added creator analytics/conversion filters, brand campaign/product analytics, admin link/conversion/risk review filters, and dashboards. Creator/brand payloads omit customer contacts/addresses; risk responses omit customer identifiers and visitor hashes.
+- [x] Verified backend **38 passed**, Python compileall; frontend **24 passed**, TypeScript, lint and production build; SQLite fresh upgrade/downgrade/re-upgrade to `0005_referral_attribution`; secret-pattern scan and `git diff --check`.
+- [ ] PostgreSQL migration/concurrency, browser E2E, external refund/payment workflow, and privacy/legal retention review remain unverified or out of scope.
 
 ## In progress / partial
 
@@ -88,7 +93,15 @@ Updated: 2026-11-25, after Phase 3 payment-option and order-lifecycle implementa
 
 The following sections preserve the Phase 1/2 records from their respective milestones. Current Phase 3 verification is listed first below.
 
-### Phase 3 verification (current working tree)
+### Phase 4 verification (current working tree)
+
+- Backend `JWT_SECRET=test-secret-that-is-long-enough-for-testing ./.venv/bin/pytest -q`: **38 passed**, one existing Starlette/httpx deprecation warning. Python `compileall` passed. New coverage includes last-valid-referral persistence across direct navigation and checkout; mixed-cart attribution; creator/brand/admin filtered analytics; self-referral ineligibility/risk; COD confirmation only after collection; cancellation history; demo simulation; duplicate checkout/reward protection; ownership and privacy assertions.
+- Frontend `npx tsc -b`, `npm run lint`, Vitest: **24 passed**, and `npm run build` passed. Vite emitted a >500 kB advisory for the ~772 kB uncompressed main JS chunk. No dedicated browser E2E test was run.
+- SQLite `0005_referral_attribution`: fresh upgrade to head, downgrade to `0004_payment_options`, re-upgrade to head all passed; current revision is `0005_referral_attribution`. Existing-data upgrade semantics for pre-existing referral rows are covered by the migration's conservative historical conversion backfill but no production PostgreSQL copy was tested.
+- Secret-pattern scan found no credential matches; `git diff --check` passed. The scan is a repository text-pattern check, not a substitute for an organization-grade secret scanner.
+- PostgreSQL migration/runtime and concurrent multi-process behavior, browser E2E, legal/privacy retention review, and real refund/payment-provider lifecycle remain unverified or unimplemented. No real payment was made or possible.
+
+### Phase 3 verification (previous milestone)
 
 - Backend `JWT_SECRET=test-secret-that-is-long-enough-for-testing ./.venv/bin/pytest -q`: **33 passed**, one Starlette/httpx deprecation warning. Python `compileall` passed. Tests cover payment method validation, backend demo success/failure/idempotency, COD unpaid status, admin-only fulfillment/collection, duplicate denial, referral reward timing/demo non-payability, customer ownership, cancellation/inventory restoration and legacy endpoint rejection.
 - Frontend Vitest: **24 passed**. `npx tsc -b`, `npm run lint` (clean), and `npm run build` passed. Production JS bundle is ~754 kB uncompressed and triggers Vite’s >500 kB advisory.

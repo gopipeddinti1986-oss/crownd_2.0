@@ -98,6 +98,12 @@ class Campaign(Base):
     ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
+class CampaignProduct(Base):
+    __tablename__ = "campaign_products"
+    campaign_id: Mapped[int] = mapped_column(ForeignKey("campaigns.id", ondelete="CASCADE"), primary_key=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="RESTRICT"), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
 class Application(Base):
     __tablename__ = "applications"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -115,6 +121,7 @@ class Referral(Base):
     creator_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id", ondelete="RESTRICT"), nullable=True, index=True)
     clicks: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
@@ -122,8 +129,79 @@ class Click(Base):
     __tablename__ = "referral_clicks"
     id: Mapped[int] = mapped_column(primary_key=True)
     referral_id: Mapped[int] = mapped_column(ForeignKey("referrals.id"), index=True)
-    clicked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
-    session_hash: Mapped[str] = mapped_column(String(64), default="")
+    clicked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    session_hash: Mapped[str] = mapped_column(String(64), default="", index=True)
+    destination: Mapped[str] = mapped_column(String(300), default="/shop")
+    referrer_origin: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    device_category: Mapped[str] = mapped_column(String(20), default="unknown")
+    status: Mapped[str] = mapped_column(String(20), default="valid")
+
+class VisitorAttribution(Base):
+    __tablename__ = "visitor_attributions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    visitor_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    first_referral_id: Mapped[int | None] = mapped_column(ForeignKey("referrals.id", ondelete="SET NULL"), nullable=True, index=True)
+    last_referral_id: Mapped[int | None] = mapped_column(ForeignKey("referrals.id", ondelete="SET NULL"), nullable=True, index=True)
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    first_touch_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    last_touch_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+class ReferralActivity(Base):
+    __tablename__ = "referral_activities"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    referral_id: Mapped[int] = mapped_column(ForeignKey("referrals.id", ondelete="RESTRICT"), index=True)
+    visitor_hash: Mapped[str] = mapped_column(String(64), index=True)
+    event_type: Mapped[str] = mapped_column(String(24), index=True)
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id", ondelete="SET NULL"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    __table_args__ = (CheckConstraint("event_type IN ('product_view','cart_add')", name="ck_referral_activity_type"),)
+
+class Conversion(Base):
+    __tablename__ = "conversions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id", ondelete="RESTRICT"), unique=True, index=True)
+    referral_id: Mapped[int | None] = mapped_column(ForeignKey("referrals.id", ondelete="SET NULL"), nullable=True, index=True)
+    creator_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    campaign_id: Mapped[int | None] = mapped_column(ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True, index=True)
+    visitor_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), index=True)
+    attributed_amount: Mapped[Decimal] = mapped_column(Numeric(12,2), default=Decimal("0.00"))
+    currency: Mapped[str] = mapped_column(String(3), default="INR")
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+    __table_args__ = (CheckConstraint("status IN ('pending','confirmed','cancelled','reversed','ineligible')", name="ck_conversion_status"),)
+
+class ConversionEvent(Base):
+    __tablename__ = "conversion_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversion_id: Mapped[int] = mapped_column(ForeignKey("conversions.id", ondelete="RESTRICT"), index=True)
+    event_key: Mapped[str] = mapped_column(String(120))
+    event_type: Mapped[str] = mapped_column(String(32))
+    from_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    to_status: Mapped[str] = mapped_column(String(20))
+    actor_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    __table_args__ = (UniqueConstraint("conversion_id", "event_key", name="uq_conversion_event_key"),)
+
+class ReferralRiskFlag(Base):
+    __tablename__ = "referral_risk_flags"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    risk_code: Mapped[str] = mapped_column(String(40), index=True)
+    referral_id: Mapped[int | None] = mapped_column(ForeignKey("referrals.id", ondelete="SET NULL"), nullable=True, index=True)
+    conversion_id: Mapped[int | None] = mapped_column(ForeignKey("conversions.id", ondelete="SET NULL"), nullable=True, index=True)
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    visitor_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    details: Mapped[str] = mapped_column(String(240), default="")
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True)
+    reviewed_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    __table_args__ = (CheckConstraint("status IN ('open','reviewed','dismissed')", name="ck_referral_risk_status"),)
 
 class Order(Base):
     __tablename__ = "orders"
@@ -212,6 +290,7 @@ class OrderItem(Base):
     unit_price: Mapped[Decimal] = mapped_column(Numeric(12,2))
     quantity: Mapped[int] = mapped_column(Integer)
     line_total: Mapped[Decimal] = mapped_column(Numeric(12,2))
+    referral_id: Mapped[int | None] = mapped_column(ForeignKey("referrals.id", ondelete="SET NULL"), nullable=True, index=True)
 
 class Reward(Base):
     __tablename__ = "rewards"

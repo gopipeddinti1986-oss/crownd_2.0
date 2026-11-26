@@ -11,11 +11,13 @@ from sqlalchemy.orm import Session
 from app.api.v1.auth import limiter
 from app.core.config import settings
 from app.database import get_db
-from app.models.entities import AuditLog, BrandProfile, Campaign, Cart, CartItem, LedgerEntry, Order, OrderItem, PaymentAttempt, Product, Referral, Reward, User
+from app.models.entities import AuditLog, BrandProfile, Campaign, CampaignProduct, Cart, CartItem, Click, Conversion, ConversionEvent, LedgerEntry, Order, OrderItem, PaymentAttempt, Product, Referral, ReferralActivity, ReferralRiskFlag, Reward, User, VisitorAttribution
 from app.schemas.commerce import CartItemRequest, CartQuantityRequest, CheckoutRequest, OrderStatusUpdate
 from app.security import current_user, require_role
 from app.services.payments import process_demo_payment
 from app.services.rewards import calculate_reward
+from app.services.referrals import attribution_state, campaign_is_active, eligible_product_ids, referral_eligibility, signed_referral_from_request, track_activity, visitor_hash
+from app.services.conversions import create_conversion, flag_risk, transition_conversion
 
 router = APIRouter()
 REFERRAL_COOKIE = "crownd_referral"
@@ -81,6 +83,8 @@ def _cart_payload(db: Session, cart: Cart, request: Request) -> dict:
         invalid_items += int(not available)
         items.append({"id": row.id, "product": _product_payload(db, product), "quantity": row.quantity, "unit_price": str(unit), "line_total": str(line), "available": available})
     referral = _get_attribution(request, db)
+    if referral and items and not any(referral_eligibility(db, referral, db.get(Product, entry["product"]["id"]))[0] for entry in items):
+        referral = None
     return {"items": items, "item_count": sum(item["quantity"] for item in items), "subtotal": str(_money(subtotal)), "shipping": "0.00", "total": str(_money(subtotal)), "currency": "INR", "unavailable_count": invalid_items, "attribution": _referral_payload(db, referral) if referral else None}
 
 
@@ -96,27 +100,7 @@ def _sign_referral(referral_id: int, expires: int) -> str:
 
 
 def _get_attribution(request: Request, db: Session) -> Referral | None:
-    raw = request.cookies.get(REFERRAL_COOKIE, "")
-    try:
-        referral_text, expires_text, provided = raw.split(".", 2)
-        referral_id, expires = int(referral_text), int(expires_text)
-    except (ValueError, TypeError):
-        return None
-    if expires < int(time.time()):
-        return None
-    expected = _sign_referral(referral_id, expires).rsplit(".", 1)[1]
-    if not hmac.compare_digest(expected, provided):
-        return None
-    referral = db.get(Referral, referral_id)
-    if not referral or not referral.active:
-        return None
-    creator = db.get(User, referral.creator_id)
-    if not creator or not creator.is_active or not creator.email_verified:
-        return None
-    campaign = db.get(Campaign, referral.campaign_id)
-    if not campaign or campaign.status != "published":
-        return None
-    return referral
+    return signed_referral_from_request(request, db)
 
 
 def _referral_payload(db: Session, referral: Referral) -> dict:
@@ -128,28 +112,27 @@ def _referral_payload(db: Session, referral: Referral) -> dict:
 def _validate_referral_for_products(db: Session, referral: Referral | None, products: list[Product]) -> Referral | None:
     if referral is None:
         return None
-    campaign = db.get(Campaign, referral.campaign_id)
-    creator = db.get(User, referral.creator_id)
-    if not campaign or campaign.status != "published" or not referral.active or not creator or not creator.is_active or not creator.email_verified:
-        return None
-    if any(campaign.product_id not in (None, product.id) for product in products):
-        return None
-    return referral
+    return referral if all(referral_eligibility(db, referral, product)[0] for product in products) else None
 
 
 def _create_referral_reward(db: Session, order: Order, *, is_demo: bool) -> None:
-    if not order.referral_id or db.scalar(select(Reward.id).where(Reward.order_id == order.id)):
+    conversion = db.scalar(select(Conversion).where(Conversion.order_id == order.id))
+    if not conversion or conversion.status != "confirmed" or conversion.attributed_amount <= 0 or db.scalar(select(Reward.id).where(Reward.order_id == order.id)):
         return
-    referral = db.get(Referral, order.referral_id)
-    campaign = db.get(Campaign, referral.campaign_id) if referral else None
-    if not referral or not campaign:
+    referral = db.get(Referral, conversion.referral_id) if conversion.referral_id else None
+    campaign = db.get(Campaign, conversion.campaign_id) if conversion.campaign_id else None
+    if not referral or not campaign or (conversion.status == "ineligible"):
         return
-    reward_amount = calculate_reward(Decimal(order.amount), campaign.reward_model, Decimal(campaign.reward_rate))
+    reward_amount = calculate_reward(Decimal(conversion.attributed_amount), campaign.reward_model, Decimal(campaign.reward_rate))
     budget_used = db.scalar(select(func.coalesce(func.sum(Reward.amount), 0)).join(Order, Reward.order_id == Order.id).where(Order.referral_id == referral.id)) or Decimal("0")
     if reward_amount <= 0 or (campaign.budget > 0 and Decimal(str(budget_used)) + reward_amount > Decimal(campaign.budget)):
         return
     db.add(Reward(order_id=order.id, creator_id=referral.creator_id, amount=reward_amount, status="pending", eligible_at=datetime.now(timezone.utc) + timedelta(days=30), is_demo=is_demo))
     db.add(LedgerEntry(reference=order.public_id, user_id=referral.creator_id, entry_type="demo_reward_pending" if is_demo else "reward_pending", amount=reward_amount))
+
+
+def _conversion_for_order(db: Session, order: Order) -> Conversion | None:
+    return db.scalar(select(Conversion).where(Conversion.order_id == order.id))
 
 
 def _payment_actor(db: Session, user_id: int | None) -> dict | None:
@@ -165,7 +148,8 @@ def _order_payload(db: Session, order: Order, include_address: bool = True) -> d
         product = db.get(Product, order.product_id)
         line_items = [{"product_id": order.product_id, "name": product.name if product else "Product", "brand": _brand_name(db, product) if product else "Brand", "image_url": product.image_url if product else "", "unit_price": str(_money(order.amount / max(order.quantity, 1))), "quantity": order.quantity, "line_total": str(_money(order.amount))}]
     attempts = db.scalars(select(PaymentAttempt).where(PaymentAttempt.order_id == order.id).order_by(PaymentAttempt.attempt_number)).all()
-    result = {"id": order.public_id, "order_id": order.public_id, "amount": str(_money(order.amount)), "currency": order.currency or "INR", "payment_method": order.payment_method or "legacy", "payment_status": order.payment_status, "transaction_reference": order.transaction_reference, "payment_confirmed_at": order.payment_confirmed_at.isoformat() if order.payment_confirmed_at else None, "payment_confirmed_by": _payment_actor(db, order.payment_confirmed_by), "payment_notes": order.payment_notes, "payment_attempts": [{"attempt_number": attempt.attempt_number, "payment_method": attempt.payment_method, "status": attempt.status, "amount": str(_money(attempt.amount)), "currency": attempt.currency, "transaction_reference": attempt.transaction_reference, "notes": attempt.notes, "created_at": attempt.created_at.isoformat(), "confirmed_at": attempt.confirmed_at.isoformat() if attempt.confirmed_at else None, "confirmed_by": _payment_actor(db, attempt.confirmed_by)} for attempt in attempts], "status": order.status, "created_at": (order.created_at or datetime.now(timezone.utc)).isoformat(), "updated_at": (order.updated_at or order.created_at or datetime.now(timezone.utc)).isoformat(), "items": line_items, "referral": _referral_payload(db, db.get(Referral, order.referral_id)) if order.referral_id and db.get(Referral, order.referral_id) else None}
+    conversion = db.scalar(select(Conversion).where(Conversion.order_id == order.id))
+    result = {"id": order.public_id, "order_id": order.public_id, "amount": str(_money(order.amount)), "currency": order.currency or "INR", "payment_method": order.payment_method or "legacy", "payment_status": order.payment_status, "transaction_reference": order.transaction_reference, "payment_confirmed_at": order.payment_confirmed_at.isoformat() if order.payment_confirmed_at else None, "payment_confirmed_by": _payment_actor(db, order.payment_confirmed_by), "payment_notes": order.payment_notes, "payment_attempts": [{"attempt_number": attempt.attempt_number, "payment_method": attempt.payment_method, "status": attempt.status, "amount": str(_money(attempt.amount)), "currency": attempt.currency, "transaction_reference": attempt.transaction_reference, "notes": attempt.notes, "created_at": attempt.created_at.isoformat(), "confirmed_at": attempt.confirmed_at.isoformat() if attempt.confirmed_at else None, "confirmed_by": _payment_actor(db, attempt.confirmed_by)} for attempt in attempts], "conversion": {"status": conversion.status, "is_demo": conversion.is_demo, "attributed_amount": str(_money(conversion.attributed_amount)), "reason": conversion.reason} if conversion else None, "status": order.status, "created_at": (order.created_at or datetime.now(timezone.utc)).isoformat(), "updated_at": (order.updated_at or order.created_at or datetime.now(timezone.utc)).isoformat(), "items": line_items, "referral": _referral_payload(db, db.get(Referral, order.referral_id)) if order.referral_id and db.get(Referral, order.referral_id) else None}
     if include_address:
         result["customer"] = {"name": order.customer_name, "email": order.customer_email}
         result["shipping_address"] = {"name": order.shipping_name, "phone": order.shipping_phone, "line1": order.shipping_line1, "line2": order.shipping_line2, "city": order.shipping_city, "state": order.shipping_state, "postal_code": order.shipping_postal_code, "country": order.shipping_country} if order.shipping_line1 else None
@@ -199,9 +183,15 @@ def product_brands(db: Session = Depends(get_db)):
 
 
 @router.get("/products")
-def product_discovery(q: str | None = Query(default=None, max_length=120), category: str | None = Query(default=None, max_length=80), brand_id: int | None = Query(default=None, gt=0), min_price: Decimal | None = Query(default=None, ge=0), max_price: Decimal | None = Query(default=None, ge=0), in_stock: bool | None = None, sort: str = Query(default="newest", pattern="^(newest|price_asc|price_desc|name)$"), page: int = Query(default=1, ge=1), page_size: int = Query(default=12, ge=1, le=60), db: Session = Depends(get_db)):
+def product_discovery(q: str | None = Query(default=None, max_length=120), category: str | None = Query(default=None, max_length=80), brand_id: int | None = Query(default=None, gt=0), min_price: Decimal | None = Query(default=None, ge=0), max_price: Decimal | None = Query(default=None, ge=0), in_stock: bool | None = None, campaign_id: int | None = Query(default=None, gt=0), sort: str = Query(default="newest", pattern="^(newest|price_asc|price_desc|name)$"), page: int = Query(default=1, ge=1), page_size: int = Query(default=12, ge=1, le=60), db: Session = Depends(get_db)):
     effective = func.coalesce(Product.sale_price, Product.price)
     stmt = select(Product).join(User, User.id == Product.brand_id).where(Product.status == "active", User.is_active.is_(True))
+    if campaign_id is not None:
+        campaign = db.get(Campaign, campaign_id)
+        if not campaign or not campaign_is_active(campaign):
+            raise HTTPException(status_code=404, detail="Campaign collection is not available")
+        allowed_ids = eligible_product_ids(db, campaign)
+        stmt = stmt.where(Product.id.in_(allowed_ids)) if allowed_ids else stmt.where(Product.id == -1)
     if q:
         term = f"%{q.strip()}%"
         stmt = stmt.where((Product.name.ilike(term)) | (Product.description.ilike(term)) | (Product.category.ilike(term)) | (select(BrandProfile.id).where(BrandProfile.user_id == User.id, BrandProfile.name.ilike(term)).exists()))
@@ -230,7 +220,7 @@ def product_detail(product_id: int, request: Request, db: Session = Depends(get_
     if not product or product.status != "active" or not brand or not brand.is_active:
         raise HTTPException(status_code=404, detail="Product not found")
     payload = _product_payload(db, product)
-    campaign = db.scalar(select(Campaign).where(or_(Campaign.product_id == product.id, Campaign.product_id.is_(None)), Campaign.status == "published").order_by(Campaign.created_at.desc()))
+    campaign = next((candidate for candidate in db.scalars(select(Campaign).where(Campaign.brand_id == product.brand_id, Campaign.status == "published").order_by(Campaign.created_at.desc())).all() if campaign_is_active(candidate) and product.id in eligible_product_ids(db, candidate)), None)
     if campaign:
         payload["creator_program"] = {"campaign": campaign.title, "reward_model": campaign.reward_model, "reward_rate": str(campaign.reward_rate), "active_creators": db.scalar(select(func.count(Referral.id)).where(Referral.campaign_id == campaign.id, Referral.active.is_(True))) or 0}
     else:
@@ -238,8 +228,11 @@ def product_detail(product_id: int, request: Request, db: Session = Depends(get_
     attribution = _get_attribution(request, db)
     referral = _validate_referral_for_products(db, attribution, [product])
     payload["attribution"] = _referral_payload(db, referral) if referral else None
+    if referral:
+        track_activity(db, request, referral, product, "product_view")
     related = db.scalars(select(Product).join(User, User.id == Product.brand_id).where(Product.status == "active", User.is_active.is_(True), Product.id != product.id, Product.category == product.category).order_by(Product.created_at.desc()).limit(4)).all()
     payload["related_products"] = [_product_payload(db, row) for row in related]
+    db.commit()
     return payload
 
 
@@ -267,6 +260,7 @@ def add_cart_item(body: CartItemRequest, request: Request, response: Response, d
     else:
         db.add(CartItem(cart_id=cart.id, product_id=product.id, quantity=desired))
     cart.updated_at = datetime.now(timezone.utc)
+    track_activity(db, request, _get_attribution(request, db), product, "cart_add")
     db.commit()
     db.refresh(cart)
     return _cart_payload(db, cart, request)
@@ -331,11 +325,17 @@ def checkout(body: CheckoutRequest, request: Request, response: Response, idempo
             raise HTTPException(status_code=409, detail=f"{product.name} no longer has enough inventory")
         subtotal += _money(_unit_price(product) * item.quantity)
     subtotal = _money(subtotal)
-    referral = _validate_referral_for_products(db, _get_attribution(request, db), products)
+    referral = _get_attribution(request, db)
+    visitor_state = attribution_state(db, request)
+    visitor_id = visitor_state.visitor_hash if visitor_state else visitor_hash(request)
+    if visitor_state and visitor_state.customer_id is None:
+        visitor_state.customer_id = user.id
     address = body.shipping_address
     order = Order(public_id="CR-" + uuid4().hex[:12].upper(), customer_name=address.name, customer_email=user.email, customer_id=user.id, idempotency_key=idempotency_key, product_id=products[0].id, quantity=rows[0][0].quantity, amount=subtotal, currency="INR", payment_method=body.payment_method, referral_id=referral.id if referral else None, payment_status="pending" if body.payment_method == "demo" else "unpaid", status="pending" if body.payment_method == "demo" else "confirmed", shipping_name=address.name, shipping_phone=address.phone, shipping_line1=address.line1, shipping_line2=address.line2, shipping_city=address.city, shipping_state=address.state, shipping_postal_code=address.postal_code, shipping_country=address.country)
     db.add(order)
     db.flush()
+    attributed_amount = Decimal("0.00")
+    eligible_product_count = 0
     for item, product, profile in rows:
         changed = db.execute(update(Product).where(Product.id == product.id, Product.status == "active", Product.stock >= item.quantity).values(stock=Product.stock - item.quantity).execution_options(synchronize_session=False))
         if changed.rowcount != 1:
@@ -343,8 +343,20 @@ def checkout(body: CheckoutRequest, request: Request, response: Response, idempo
             raise HTTPException(status_code=409, detail=f"{product.name} sold out during checkout. Review your cart.")
         unit = _unit_price(product)
         brand = profile.name if profile else _brand_name(db, product)
-        db.add(OrderItem(order_id=order.id, product_id=product.id, product_name=product.name, brand_name=brand, image_url=product.image_url, unit_price=unit, quantity=item.quantity, line_total=_money(unit * item.quantity)))
+        line_total = _money(unit * item.quantity)
+        item_referral_id = None
+        if referral:
+            eligible, _eligibility_reason = referral_eligibility(db, referral, product)
+            if eligible:
+                item_referral_id = referral.id
+                attributed_amount += line_total
+                eligible_product_count += 1
+        db.add(OrderItem(order_id=order.id, product_id=product.id, product_name=product.name, brand_name=brand, image_url=product.image_url, unit_price=unit, quantity=item.quantity, line_total=line_total, referral_id=item_referral_id))
         db.delete(item)
+
+    conversion = None
+    if referral:
+        conversion = create_conversion(db, order, referral, visitor_hash=visitor_id, attributed_amount=attributed_amount, eligible_product_count=eligible_product_count, customer=user)
 
     if body.payment_method == "demo":
         force_failure = request.headers.get("X-Demo-Payment-Test-Failure", "").lower() == "true"
@@ -362,7 +374,9 @@ def checkout(body: CheckoutRequest, request: Request, response: Response, idempo
         if not result.successful:
             for item, product, _profile in rows:
                 db.execute(update(Product).where(Product.id == product.id).values(stock=Product.stock + item.quantity))
+            transition_conversion(db, conversion, "cancelled", event_key=f"demo-failed:{order.id}", event_type="payment_failed", reason="demo_payment_failed")
         else:
+            transition_conversion(db, conversion, "confirmed", event_key=f"demo-confirmed:{order.id}", event_type="demo_payment_confirmed", reason="simulated_success")
             _create_referral_reward(db, order, is_demo=True)
     else:
         db.add(PaymentAttempt(order_id=order.id, attempt_number=1, idempotency_key=idempotency_key, payment_method="cod", status="unpaid", amount=subtotal, currency="INR", notes="Payment will be collected on delivery."))
@@ -455,6 +469,8 @@ def admin_collect_cod_payment(order_id: str, db: Session = Depends(get_db), user
     else:
         db.add(PaymentAttempt(order_id=order.id, attempt_number=1, idempotency_key=f"cod-collection:{order.public_id}", payment_method="cod", status="paid", amount=order.amount, currency=order.currency, transaction_reference=reference, notes=note, confirmed_at=now, confirmed_by=user.id))
     db.expire(order)
+    conversion = _conversion_for_order(db, order)
+    transition_conversion(db, conversion, "confirmed", event_key=f"cod-collected:{order.id}", event_type="cod_collection_confirmed", actor_id=user.id)
     _create_referral_reward(db, order, is_demo=False)
     db.add(AuditLog(actor_id=user.id, action="order.cod_payment_collected", entity_type="order", entity_id=order.public_id))
     db.commit()
@@ -501,6 +517,8 @@ def _cancel_order_record(db: Session, order: Order, actor: User) -> dict:
             attempt.notes = order.payment_notes
     if actor.role == "admin":
         db.add(AuditLog(actor_id=actor.id, action="order.cancelled_by_admin", entity_type="order", entity_id=order.public_id))
+    conversion = _conversion_for_order(db, order)
+    transition_conversion(db, conversion, "cancelled", event_key=f"order-cancelled:{order.id}", event_type="order_cancelled", actor_id=actor.id, reason="order_cancelled")
     db.commit()
     return _order_payload(db, order)
 

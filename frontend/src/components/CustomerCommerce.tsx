@@ -1,5 +1,5 @@
 import {FormEvent,useEffect,useMemo,useRef,useState} from 'react';
-import {Link,useLocation,useNavigate,useParams} from 'react-router-dom';
+import {Link,useLocation,useNavigate,useParams,useSearchParams} from 'react-router-dom';
 import {useQuery,useQueryClient} from '@tanstack/react-query';
 import {ArrowLeft,ArrowRight,Check,Minus,Package, X,Plus,RefreshCw,ShoppingBag,Trash2,Truck} from 'lucide-react';
 import {api,authErrorMessage,CommerceProduct,discoverProducts,getProduct,getCart,addCartItem,updateCartItem,removeCartItem,clearCart,checkoutOrder,getOrders,getOrder,cancelOrder,trackReferral,getAdminOrders,getAdminOrder,collectCodPayment,updateAdminOrderStatus,cancelAdminOrder,User,CommerceOrder} from '../services/api';
@@ -15,8 +15,9 @@ function useCartRefresh(){const query=useQueryClient();return()=>query.invalidat
 function requireLogin(user:User|null){if(user)return true;window.dispatchEvent(new Event('crownd:open-auth'));return false;}
 
 export function ShopPage({user,notify}:{user:User|null;notify:(text:string)=>void}){
+  const [searchParams]=useSearchParams();const campaignId=searchParams.get('campaign_id')||'';
   const [search,setSearch]=useState('');const [category,setCategory]=useState('');const [brandId,setBrandId]=useState('');const [minPrice,setMinPrice]=useState('');const [maxPrice,setMaxPrice]=useState('');const [inStock,setInStock]=useState(false);const [sort,setSort]=useState('newest');const [page,setPage]=useState(1);
-  const query=useQuery({queryKey:['shop-products',search,category,brandId,minPrice,maxPrice,inStock,sort,page],queryFn:()=>discoverProducts({q:search||undefined,category:category||undefined,brand_id:brandId||undefined,min_price:minPrice||undefined,max_price:maxPrice||undefined,in_stock:inStock?true:undefined,sort,page,page_size:12})});
+  const query=useQuery({queryKey:['shop-products',search,category,brandId,minPrice,maxPrice,inStock,sort,page,campaignId],queryFn:()=>discoverProducts({q:search||undefined,category:category||undefined,brand_id:brandId||undefined,min_price:minPrice||undefined,max_price:maxPrice||undefined,in_stock:inStock?true:undefined,campaign_id:campaignId||undefined,sort,page,page_size:12})});
   const categories=useQuery({queryKey:['shop-categories'],queryFn:async()=>{const {data}=await api.get('/products/categories');return data as string[]}});
   const brands=useQuery({queryKey:['shop-brands'],queryFn:async()=>{const {data}=await api.get('/products/brands');return data as Array<{id:number;name:string}>}});
   const refreshCart=useCartRefresh();
