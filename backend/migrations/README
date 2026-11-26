@@ -1,0 +1,1 @@
+Alembic owns schema changes. Apply with `alembic upgrade head`; create future revisions with `alembic revision --autogenerate -m "description"`, then review generated SQL before applying.
