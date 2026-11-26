@@ -7,7 +7,7 @@
 ## Phase 11 execution delta
 
 - Docker, Compose, Podman, nerdctl and daemon sockets are absent on Debian 12. No Docker installation was performed; no apt sources are configured and OS repository access is not available in this environment.
-- The connected Supabase integration reports one healthy PostgreSQL 17 project with existing CROWND-labelled migrations but no listed DB branch. Its purpose/isolation is unconfirmed; only metadata was read, and no SQL or data access/write was performed.
+- The connected Supabase integration reports one healthy PostgreSQL 17 project with existing CROWND-labelled migrations but no listed DB branch. The user declined its use and chose a different isolated DB; that target has not yet been supplied. Only provider metadata was read, with no SQL or data access/write.
 - A new disposable SQLite DB was migrated from empty through `0009_notifications`, seeded, and used by a host-run FastAPI/Vite HTTP smoke test. Worker one-shot suppression, heartbeat, graceful SIGTERM and process restart were exercised against this SQLite DB only.
 - A Playwright/Chromium package feasibility probe was installed without modifying package manifests; Chromium launch failed because the OS library `libnspr4.so` is absent. No browser E2E ran.
 - Full evidence and exact commands are in [`PHASE_11_INFRASTRUCTURE_VALIDATION.md`](PHASE_11_INFRASTRUCTURE_VALIDATION.md) and [`PHASE_11_VALIDATION_RESULTS.md`](PHASE_11_VALIDATION_RESULTS.md); architecture/cost tradeoffs are in [`PHASE_11_HOSTING_EVALUATION.md`](PHASE_11_HOSTING_EVALUATION.md).

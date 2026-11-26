@@ -60,8 +60,8 @@ The connected Supabase service returned `ACTIVE_HEALTHY` for its PostgreSQL data
 
 ## Safe next actions
 
-1. Provide/authorize a disposable PostgreSQL target (or explicitly confirm the existing Supabase project is a non-production, isolated test project and authorize the exact schema/data operations). Existing CROWND-labelled migrations must be reconciled with local Alembic before any write.
-2. Provide an approved Docker-capable runner or authorize system-level Docker installation/configuration with working OS package access. Then run `docker compose config`, builds, isolated `up`, health/restart/volume checks, and clean up only the newly created test resources. Never remove existing volumes.
+1. The user chose a different isolated PostgreSQL target and declined use of the existing Supabase project. No alternate endpoint/secure connection has been supplied yet, so PostgreSQL validation remains blocked. Provide the disposable target through an approved secure mechanism; do not put credentials in chat. Reconcile the local Alembic history before writes.
+2. The user chose to defer Docker installation. Provide an approved Docker-capable runner later; no system packages will be installed in this sandbox. Then run `docker compose config`, builds, isolated `up`, health/restart/volume checks, and clean up only newly created test resources. Never remove existing volumes.
 3. Provide an environment with PostgreSQL server/client tools and `age`, or authorized package access. Then test fresh/historical Alembic upgrades, backup and restore into a new isolated DB.
 4. For browser tests, use a browser-capable runner with Chromium OS libraries (`libnspr4` and other required libraries) or an approved Playwright browser image. Do not claim browser E2E until the real browser starts and workflows execute.
 5. Configure an authorized test SMTP relay/mailbox through secret management only, then distinguish message generation, SMTP acceptance, provider delivery and inbox verification.

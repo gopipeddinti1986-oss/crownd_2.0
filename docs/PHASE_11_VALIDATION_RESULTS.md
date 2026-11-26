@@ -41,8 +41,8 @@
 
 ## Blockers and exact next procedure
 
-1. Obtain an approved disposable PostgreSQL target or explicit confirmation that the existing connected Supabase project is isolated and authorized for the stated test writes. Its CROWND migration history is not the local Alembic history; first compare schema/migration state without mutating it. Do not run migrations or seed data in that project before approval.
-2. Provide an approved Docker-capable runner. Alternatively, explicitly authorize system-level Docker installation and configure OS package access; current Debian package sources are absent and this environment's outbound allowlist does not include Docker/OS package repositories. Then run `docker compose config`, build, and bring up only an isolated test project. Inspect volumes before any teardown; never remove an existing volume.
+1. The user selected a different isolated PostgreSQL target and explicitly declined use of the existing Supabase project. Supply the alternate target through an approved secure mechanism (not chat); its Alembic/schema history must be checked before any write.
+2. The user chose to defer Docker installation. Provide an approved Docker-capable runner later. Then run `docker compose config`, build, and bring up only an isolated test project. Inspect volumes before any teardown; never remove an existing volume.
 3. Install/provide PostgreSQL and `age` tools only in an approved environment. Use a new disposable DB and synthetic data. Run Alembic fresh and historical paths, then backup to an encrypted file, verify it, restore to a *different new* DB and compare schema/counts/FKs/representative records.
 4. Use a browser runner/container with Chromium plus OS shared libraries (including `libnspr4`). Add/keep Playwright tests only after browser launch and an actual workflow execute; produce trace/report/screenshots as artifacts without committing large browser binaries.
 5. Configure an explicitly approved test SMTP mailbox through secret management and measure message generated, SMTP accepted, provider-delivered and inbox-verified as separate results.
