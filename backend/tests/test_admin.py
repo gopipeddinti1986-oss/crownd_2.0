@@ -38,6 +38,16 @@ def admin_client():
     app.dependency_overrides.clear(); limiter.reset(); engine.dispose()
 
 
+def test_admin_mutation_rate_limit_is_enforced(admin_client):
+    client, _factory, account = admin_client
+    admin_id, admin = account("admin", "Rate Limit Admin")
+    target_id, _target = account("customer", "Rate Limit Target")
+    responses=[client.post(f"/api/v1/admin/users/{target_id}/lifecycle",headers=admin,
+        json={"active":False,"reason":"valid reason for test","confirmation":"WRONG"}) for _ in range(11)]
+    assert all(response.status_code == 422 for response in responses[:10])
+    assert responses[10].status_code == 429
+
+
 def test_admin_user_lifecycle_requires_reason_revokes_sessions_and_masks_pii(admin_client):
     client, factory, account = admin_client
     admin_id, admin = account("admin", "Admin Person")

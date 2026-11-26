@@ -12,7 +12,10 @@ class OutgoingEmail:
     text: str
 
 class EmailDeliveryError(RuntimeError):
-    pass
+    def __init__(self, message: str = "Email delivery failed", *, category: str = "provider_error", retryable: bool = True):
+        super().__init__(message)
+        self.category = category
+        self.retryable = retryable
 
 class EmailProvider:
     def send(self, message: OutgoingEmail) -> bool:
@@ -26,29 +29,40 @@ class DisabledEmailProvider(EmailProvider):
 class SMTPEmailProvider(EmailProvider):
     def send(self, message: OutgoingEmail) -> bool:
         if not settings.smtp_host or not settings.email_from:
-            raise EmailDeliveryError("SMTP delivery is enabled but SMTP_HOST/EMAIL_FROM is missing")
+            raise EmailDeliveryError("Email provider is not configured", category="provider_misconfigured", retryable=False)
         # Reject line breaks and controls before values reach RFC mail headers.
         for value in (settings.email_from, message.to, message.subject):
             if any(ord(char) < 32 or ord(char) == 127 for char in value):
-                raise EmailDeliveryError("Email header contains unsupported characters")
+                raise EmailDeliveryError("Email payload is invalid", category="payload_invalid", retryable=False)
         if len(message.to) > 255 or "@" not in message.to or len(message.subject) > 160:
-            raise EmailDeliveryError("Email headers are invalid")
+            raise EmailDeliveryError("Email payload is invalid", category="payload_invalid", retryable=False)
         email=EmailMessage()
         email["From"]=settings.email_from
         email["To"]=message.to
         email["Subject"]=message.subject
         email.set_content(message.text)
         try:
-            with smtplib.SMTP(settings.smtp_host,settings.smtp_port,timeout=10) as smtp:
+            with smtplib.SMTP(settings.smtp_host,settings.smtp_port,timeout=settings.smtp_timeout_seconds) as smtp:
                 if settings.smtp_starttls:
                     smtp.starttls(context=ssl.create_default_context())
                 if settings.smtp_username:
                     smtp.login(settings.smtp_username,settings.smtp_password or "")
                 smtp.send_message(email)
             return True
-        except (OSError, smtplib.SMTPException) as exc:
+        except smtplib.SMTPAuthenticationError:
+            raise EmailDeliveryError("Email provider authentication failed", category="provider_authentication", retryable=False) from None
+        except smtplib.SMTPRecipientsRefused as exc:
+            codes = [int(reply[0]) for reply in exc.recipients.values() if reply and reply[0]]
+            retryable = bool(codes) and all(400 <= code < 500 for code in codes)
+            category = "recipient_temporary" if retryable else "recipient_rejected"
+            raise EmailDeliveryError("Email recipient was rejected", category=category, retryable=retryable) from None
+        except smtplib.SMTPResponseException as exc:
+            retryable = 400 <= int(exc.smtp_code) < 500
+            category = "provider_temporary" if retryable else "provider_rejected"
+            raise EmailDeliveryError("Email provider rejected the message", category=category, retryable=retryable) from None
+        except (OSError, smtplib.SMTPException):
             # Do not include message, credentials, reset token, or SMTP response in exception/log output.
-            raise EmailDeliveryError("Email provider delivery failed") from exc
+            raise EmailDeliveryError("Email provider delivery failed", category="provider_transient", retryable=True) from None
 
 def get_email_provider() -> EmailProvider:
     if settings.email_mode == "smtp":

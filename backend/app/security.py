@@ -5,7 +5,8 @@ import ipaddress
 import secrets
 from urllib.parse import urlsplit
 from pwdlib import PasswordHash
-from jose import jwt, JWTError
+import jwt
+from jwt.exceptions import InvalidTokenError
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
@@ -68,9 +69,9 @@ def create_access_token(user: User, session_id: str) -> str:
 def decode_access_token(token: str) -> dict:
     try:
         payload=jwt.decode(token,settings.jwt_secret,algorithms=[ALGORITHM],options={"require_exp":True,"require_sub":True})
-        if not payload.get("sid"): raise JWTError("missing session")
+        if not payload.get("sid"): raise InvalidTokenError("missing session")
         return payload
-    except (JWTError,KeyError,ValueError,TypeError):
+    except (InvalidTokenError,KeyError,ValueError,TypeError):
         raise HTTPException(status_code=401,detail="Authentication required",headers={"WWW-Authenticate":"Bearer"})
 
 def current_user(request: Request, token: str|None=Depends(oauth2), db: Session=Depends(get_db)) -> User:

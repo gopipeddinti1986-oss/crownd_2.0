@@ -1,7 +1,7 @@
 """Recipient-scoped inbox, preferences, and admin-only delivery telemetry."""
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.database import get_db
 from app.models.entities import EmailDelivery, Notification, NotificationPreference, User
 from app.security import current_user, require_role
+from app.api.v1.auth import limiter
 from app.services.notifications import CATEGORIES, get_or_create_preferences
 
 router = APIRouter()
@@ -43,7 +44,8 @@ def _preferences_payload(row: NotificationPreference) -> dict:
 
 
 @router.get("/notifications")
-def list_notifications(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+@limiter.limit("60/minute")
+def list_notifications(request: Request, response: Response, page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
                       unread_only: bool = False, db: Session = Depends(get_db), user: User = Depends(current_user)):
     stmt = select(Notification).where(Notification.recipient_id == user.id)
     if unread_only:
@@ -61,7 +63,8 @@ def list_notifications(page: int = Query(1, ge=1), page_size: int = Query(20, ge
 
 
 @router.patch("/notifications/{notification_id}/read")
-def mark_notification_read(notification_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
+@limiter.limit("30/minute")
+def mark_notification_read(notification_id: int, request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(current_user)):
     row = db.scalar(select(Notification).where(Notification.id == notification_id,
         Notification.recipient_id == user.id))
     if not row:
@@ -73,7 +76,8 @@ def mark_notification_read(notification_id: int, db: Session = Depends(get_db), 
 
 
 @router.post("/notifications/read-all")
-def mark_all_notifications_read(db: Session = Depends(get_db), user: User = Depends(current_user)):
+@limiter.limit("10/minute")
+def mark_all_notifications_read(request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(current_user)):
     result = db.execute(update(Notification).where(Notification.recipient_id == user.id,
         Notification.read_at.is_(None)).values(read_at=datetime.now(timezone.utc)))
     db.commit()
@@ -81,7 +85,8 @@ def mark_all_notifications_read(db: Session = Depends(get_db), user: User = Depe
 
 
 @router.get("/notifications/preferences")
-def get_notification_preferences(db: Session = Depends(get_db), user: User = Depends(current_user)):
+@limiter.limit("60/minute")
+def get_notification_preferences(request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(current_user)):
     row = db.scalar(select(NotificationPreference).where(NotificationPreference.user_id == user.id))
     if not row:
         return {"in_app_enabled": True, "email_enabled": True, "category_settings": {}, "updated_at": None}
@@ -89,7 +94,8 @@ def get_notification_preferences(db: Session = Depends(get_db), user: User = Dep
 
 
 @router.put("/notifications/preferences")
-def update_notification_preferences(body: PreferencesUpdate, db: Session = Depends(get_db), user: User = Depends(current_user)):
+@limiter.limit("10/minute")
+def update_notification_preferences(body: PreferencesUpdate, request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(current_user)):
     row = get_or_create_preferences(db, user.id)
     row.in_app_enabled = body.in_app_enabled
     row.email_enabled = body.email_enabled
@@ -101,7 +107,8 @@ def update_notification_preferences(body: PreferencesUpdate, db: Session = Depen
 
 
 @router.get("/admin/notification-deliveries/summary")
-def notification_delivery_summary(db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
+@limiter.limit("30/minute")
+def notification_delivery_summary(request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
     grouped = dict(db.execute(select(EmailDelivery.status, func.count(EmailDelivery.id)).group_by(EmailDelivery.status)).all())
     latest = db.scalar(select(func.max(EmailDelivery.created_at)))
     provider_configured = bool(settings.email_mode == "smtp" and settings.smtp_host and settings.email_from)
@@ -113,7 +120,8 @@ def notification_delivery_summary(db: Session = Depends(get_db), user: User = De
 
 
 @router.get("/admin/notification-deliveries")
-def list_notification_deliveries(status: str | None = Query(None, pattern="^(pending|sending|sent|suppressed|failed)$"),
+@limiter.limit("60/minute")
+def list_notification_deliveries(request: Request, response: Response, status: str | None = Query(None, pattern="^(pending|sending|sent|suppressed|failed)$"),
                                  category: str | None = Query(None, pattern="^(order|campaign|application|reward|security|account)$"),
                                  page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100),
                                  db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):

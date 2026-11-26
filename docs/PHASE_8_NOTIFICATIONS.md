@@ -43,7 +43,7 @@ Frontend routes: `/notifications`, `/settings/notifications`, and admin-only `/a
 ## Operation
 
 - Local process: run API and `python -m app.worker` with the same `DATABASE_URL`, `JWT_SECRET`, `EMAIL_MODE`, and SMTP settings. `backend/.env.example` documents the current configuration.
-- Compose: `docker compose up --build` starts the distinct `notification-worker` service and local Mailpit sink. Mailpit is local-only; it is not a configured external sender.
+- Compose: `docker compose up --build` starts the distinct `notification-worker` service. Mailpit is optional (`--profile dev-mail`) and loopback-only; the default Compose email mode is disabled. Mailpit is not an external sender.
 - With `EMAIL_MODE=disabled`, the worker marks due rows `suppressed` (`provider_disabled`) and no mail is sent. New accounts cannot verify/login until email is configured. With SMTP configured but no worker, outbox rows remain pending.
 - Admin delivery monitor is telemetry, not a resend tool or provider health probe. It cannot confirm inbox receipt, bounces or external SMTP availability.
 

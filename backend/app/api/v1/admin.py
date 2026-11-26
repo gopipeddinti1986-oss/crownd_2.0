@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 from app.database import get_db
@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.models.entities import (AdminAuditEvent, AdminDispute, AdminDisputeEvent, AuthSession, EmailDelivery,
     BrandProfile, Campaign, Conversion, CreatorProfile, Order, ReferralRiskFlag, Reward, User)
 from app.security import require_role
+from app.api.v1.auth import limiter
 from app.services.auth import revoke_sessions
 from app.services.notifications import create_notification
 
@@ -69,7 +70,8 @@ def _mask(email: str) -> str:
 
 
 @router.get("/admin/operations")
-def operations_overview(db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
+@limiter.limit("30/minute")
+def operations_overview(request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
     # DB reachability is tested, but external service health is intentionally not inferred.
     db.scalar(text("SELECT 1"))
     count = lambda stmt: int(db.scalar(stmt) or 0)
@@ -96,7 +98,8 @@ def operations_overview(db: Session = Depends(get_db), user: User = Depends(requ
 
 
 @router.get("/admin/users")
-def search_users(q: str | None = Query(None, max_length=100), role: str | None = Query(None, pattern="^(creator|brand|customer|admin)$"),
+@limiter.limit("60/minute")
+def search_users(request: Request, response: Response, q: str | None = Query(None, max_length=100), role: str | None = Query(None, pattern="^(creator|brand|customer|admin)$"),
                 active: bool | None = None, verification: str | None = Query(None, pattern="^(unverified|verified|rejected)$"),
                 page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100),
                 db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
@@ -122,7 +125,8 @@ def search_users(q: str | None = Query(None, max_length=100), role: str | None =
 
 
 @router.post("/admin/users/{user_id}/lifecycle")
-def change_user_lifecycle(user_id: int, body: LifecycleAction, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
+@limiter.limit("10/minute")
+def change_user_lifecycle(user_id: int, body: LifecycleAction, request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
     target_role = db.scalar(select(User.role).where(User.id == user_id))
     if target_role is None: raise HTTPException(404, "User not found")
     if target_role == "admin" and not body.active:
@@ -154,7 +158,8 @@ def change_user_lifecycle(user_id: int, body: LifecycleAction, db: Session = Dep
 
 
 @router.post("/admin/verification/{role}/{user_id}")
-def review_verification(role: str, user_id: int, body: VerificationAction, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
+@limiter.limit("10/minute")
+def review_verification(role: str, user_id: int, body: VerificationAction, request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
     if role not in {"creator", "brand"}: raise HTTPException(422, "Only creator and brand profiles have manual verification")
     target = db.get(User, user_id)
     if not target or target.role != role: raise HTTPException(404, "Profile not found")
@@ -169,7 +174,8 @@ def review_verification(role: str, user_id: int, body: VerificationAction, db: S
 
 
 @router.get("/admin/campaigns")
-def list_campaigns(status: str = Query("draft", pattern="^(draft|published|paused|rejected|all)$"), q: str | None = Query(None, max_length=100),
+@limiter.limit("60/minute")
+def list_campaigns(request: Request, response: Response, status: str = Query("draft", pattern="^(draft|published|paused|rejected|all)$"), q: str | None = Query(None, max_length=100),
                   page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100),
                   db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
     stmt = select(Campaign)
@@ -182,7 +188,8 @@ def list_campaigns(status: str = Query("draft", pattern="^(draft|published|pause
 
 
 @router.post("/admin/campaigns/{campaign_id}/moderation")
-def moderate_campaign(campaign_id: int, body: ModerationAction, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
+@limiter.limit("10/minute")
+def moderate_campaign(campaign_id: int, body: ModerationAction, request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
     campaign = db.scalar(select(Campaign).where(Campaign.id == campaign_id).with_for_update())
     if not campaign: raise HTTPException(404, "Campaign not found")
     if body.confirmation != body.status.upper(): raise HTTPException(422, f"Type {body.status.upper()} to confirm this moderation action")
@@ -201,7 +208,8 @@ def moderate_campaign(campaign_id: int, body: ModerationAction, db: Session = De
 
 
 @router.get("/admin/disputes")
-def list_disputes(status: str = Query("open", pattern="^(open|under_review|resolved|all)$"), page: int = Query(1, ge=1),
+@limiter.limit("60/minute")
+def list_disputes(request: Request, response: Response, status: str = Query("open", pattern="^(open|under_review|resolved|all)$"), page: int = Query(1, ge=1),
                   page_size: int = Query(25, ge=1, le=100), db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
     stmt = select(AdminDispute)
     if status != "all": stmt = stmt.where(AdminDispute.status == status)
@@ -215,7 +223,8 @@ def list_disputes(status: str = Query("open", pattern="^(open|under_review|resol
 
 
 @router.post("/admin/disputes", status_code=201)
-def create_dispute(body: DisputeCreate, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
+@limiter.limit("10/minute")
+def create_dispute(body: DisputeCreate, request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
     if not any((body.order_id, body.conversion_id, body.reward_id)): raise HTTPException(422, "Link the case to an order, conversion, or reward")
     if body.order_id and not db.get(Order, body.order_id): raise HTTPException(404, "Order not found")
     if body.conversion_id and not db.get(Conversion, body.conversion_id): raise HTTPException(404, "Conversion not found")
@@ -232,7 +241,8 @@ def create_dispute(body: DisputeCreate, db: Session = Depends(get_db), user: Use
 
 
 @router.post("/admin/disputes/{dispute_id}/status")
-def update_dispute(dispute_id: int, body: DisputeAction, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
+@limiter.limit("10/minute")
+def update_dispute(dispute_id: int, body: DisputeAction, request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
     case = db.scalar(select(AdminDispute).where(AdminDispute.id == dispute_id).with_for_update())
     if not case: raise HTTPException(404, "Dispute not found")
     if body.confirmation != body.status.upper(): raise HTTPException(422, f"Type {body.status.upper()} to confirm this case action")
@@ -248,7 +258,8 @@ def update_dispute(dispute_id: int, body: DisputeAction, db: Session = Depends(g
 
 
 @router.get("/admin/audit-events")
-def list_admin_audit_events(action: str | None = Query(None, max_length=100), entity_type: str | None = Query(None, max_length=60),
+@limiter.limit("60/minute")
+def list_admin_audit_events(request: Request, response: Response, action: str | None = Query(None, max_length=100), entity_type: str | None = Query(None, max_length=60),
                            page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=100),
                            db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
     stmt = select(AdminAuditEvent)

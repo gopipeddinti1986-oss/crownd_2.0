@@ -225,10 +225,12 @@ def deliver_one(db: Session, *, now: datetime | None = None) -> bool:
         delivery.last_error_code = "payload_unavailable"
         delivery.claimed_at = None
         db.commit()
-    except EmailDeliveryError:
+    except EmailDeliveryError as exc:
         delivery.claimed_at = None
-        delivery.last_error_code = "provider_error"
-        if delivery.attempt_count >= MAX_ATTEMPTS:
+        allowed_codes = {"provider_error", "provider_misconfigured", "payload_invalid", "provider_authentication",
+            "recipient_temporary", "recipient_rejected", "provider_temporary", "provider_rejected", "provider_transient"}
+        delivery.last_error_code = exc.category if exc.category in allowed_codes else "provider_error"
+        if not exc.retryable or delivery.attempt_count >= MAX_ATTEMPTS:
             delivery.status = "failed"
         else:
             delivery.status = "pending"

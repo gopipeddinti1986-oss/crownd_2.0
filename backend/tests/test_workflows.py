@@ -3,16 +3,14 @@ from datetime import timedelta, timezone, datetime
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 import hashlib
-import os
 from decimal import Decimal
-from jose import jwt
+import jwt
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-os.environ.setdefault("JWT_SECRET","test-secret-that-is-long-enough-for-testing")
 from app.api.v1 import auth as auth_routes
 from app.api.v1.auth import limiter
 from app.core.config import Settings, settings
@@ -222,14 +220,60 @@ def test_authentication_rate_limit(client):
     assert responses[8].status_code==429
 
 def test_production_configuration_fails_closed():
+    common={"app_env":"production","jwt_secret":"a"*48,"email_mode":"smtp","smtp_host":"mail.example",
+        "cors_origins":"https://crownd.example","frontend_base_url":"https://crownd.example",
+        "rate_limit_storage_uri":"rediss://redis.example:6380/0","trusted_proxy_ips":"10.1.0.2",
+        "forwarded_allow_ips":"10.1.0.2","trusted_hosts":"crownd.example,api.crownd.example"}
     with pytest.raises(ValueError):
         Settings(app_env="production",jwt_secret="short",email_mode="disabled")
     with pytest.raises(ValueError):
-        Settings(app_env="production",jwt_secret="a"*48,email_mode="smtp",smtp_host="localhost",cors_origins="https://crownd.example",frontend_base_url="https://crownd.example",rate_limit_storage_uri="memory://",trusted_proxy_ips="10.1.0.2")
+        Settings(**{**common,"rate_limit_storage_uri":"memory://"})
     with pytest.raises(ValueError):
-        Settings(app_env="production",cookie_secure=False,cookie_samesite="none",jwt_secret="a"*48,email_mode="smtp",smtp_host="mail.example",cors_origins="https://crownd.example",frontend_base_url="https://crownd.example",rate_limit_storage_uri="redis://localhost:6379/0",trusted_proxy_ips="10.1.0.2")
-    safe=Settings(app_env="production",database_url="postgresql+psycopg://app:secret@db/crownd",jwt_secret="a"*48,email_mode="smtp",smtp_host="mail.example",cors_origins="https://crownd.example",frontend_base_url="https://crownd.example",rate_limit_storage_uri="redis://localhost:6379/0",trusted_proxy_ips="10.1.0.2")
+        Settings(**{**common,"rate_limit_storage_uri":"redis://redis.example:6379/0"})
+    with pytest.raises(ValueError):
+        Settings(**{**common,"cookie_secure":False,"cookie_samesite":"none"})
+    with pytest.raises(ValueError):
+        Settings(**{**common,"database_url":"postgresql+psycopg://app:secret@db/crownd"})
+    with pytest.raises(ValueError):
+        Settings(**{**common,"database_url":"postgresql+psycopg://app:secret@db/crownd?sslmode=require","trusted_hosts":"*"})
+    with pytest.raises(ValueError):
+        Settings(**{**common,"forwarded_allow_ips":"*"})
+    with pytest.raises(ValueError):
+        Settings(**{**common,"forwarded_allow_ips":"not-an-ip"})
+    safe=Settings(**{**common,"database_url":"postgresql+psycopg://app:secret@db/crownd?sslmode=verify-full"})
     assert safe.use_secure_cookies is True
+
+def test_readiness_request_id_and_security_headers(client, caplog):
+    import logging
+    caplog.set_level(logging.INFO, logger="crownd.api")
+    response=client.get("/api/v1/health/ready?token=phase10-query-secret",headers={"X-Request-ID":"phase10-check_01"})
+    assert response.status_code==200 and response.json()=={"status":"ready","dependencies":{"database":"ok"}}
+    assert response.headers["x-request-id"]=="phase10-check_01"
+    assert response.headers["x-content-type-options"]=="nosniff"
+    assert response.headers["x-frame-options"]=="DENY"
+    assert response.headers["permissions-policy"]=="camera=(), microphone=(), geolocation=()"
+    assert "phase10-query-secret" not in caplog.text
+    bad_host=client.get("/api/v1/health/live",headers={"host":"attacker.example"})
+    assert bad_host.status_code==400
+
+
+def test_readiness_database_failure_is_generic(client):
+    from sqlalchemy.exc import OperationalError
+    original=app.dependency_overrides[get_db]
+    def broken_db():
+        class BrokenSession:
+            def execute(self,_statement):
+                raise OperationalError("SELECT 1",{},Exception("secret database detail"))
+        yield BrokenSession()
+    app.dependency_overrides[get_db]=broken_db
+    try:
+        response=client.get("/api/v1/health/ready")
+        assert response.status_code==503
+        assert "secret database detail" not in response.text
+        assert "DATABASE_URL" not in response.text
+    finally:
+        app.dependency_overrides[get_db]=original
+
 
 def test_development_email_provider_reports_no_delivery(monkeypatch):
     from app.services.email import DisabledEmailProvider, OutgoingEmail

@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import smtplib
 from hashlib import sha256
 
 import pytest
@@ -14,7 +15,7 @@ from app.main import app
 from app.models.entities import AuthActionToken, EmailDelivery, Notification, NotificationPreference, User
 from app.security import create_access_token
 from app.services.auth import create_session
-from app.services.email import EmailDeliveryError
+from app.services.email import EmailDeliveryError, OutgoingEmail, SMTPEmailProvider
 from app.services.notifications import create_notification, decrypt_email, enqueue_action_email, process_due_deliveries, utcnow
 
 
@@ -120,6 +121,52 @@ def test_action_email_outbox_encrypts_one_use_link_and_is_idempotent(notificatio
         rendered = decrypt_email(row.encrypted_message, user.email)
         assert "#token=one-time-secret-token" in rendered.text
         assert "one-time-secret-token" not in row.event_key
+
+
+def test_smtp_authentication_failure_is_permanent_and_redacted(monkeypatch):
+    monkeypatch.setattr(settings, "smtp_host", "smtp.example.test")
+    monkeypatch.setattr(settings, "smtp_port", 587)
+    monkeypatch.setattr(settings, "email_from", "CROWND <no-reply@example.test>")
+    monkeypatch.setattr(settings, "smtp_username", "smtp-user")
+    monkeypatch.setattr(settings, "smtp_password", "sensitive-smtp-password")
+    monkeypatch.setattr(settings, "smtp_starttls", True)
+    class FakeSMTP:
+        def __init__(self, *_args, **_kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+        def starttls(self, **_kwargs): pass
+        def login(self, *_args): raise smtplib.SMTPAuthenticationError(535, b"private provider response")
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+    with pytest.raises(EmailDeliveryError) as raised:
+        SMTPEmailProvider().send(OutgoingEmail("buyer@example.test", "Subject", "Body"))
+    assert raised.value.category == "provider_authentication"
+    assert raised.value.retryable is False
+    assert "sensitive-smtp-password" not in str(raised.value)
+    assert "private provider response" not in str(raised.value)
+
+
+def test_smtp_transient_response_is_retryable_and_permanent_rejection_is_not(monkeypatch):
+    monkeypatch.setattr(settings, "smtp_host", "smtp.example.test")
+    monkeypatch.setattr(settings, "smtp_port", 587)
+    monkeypatch.setattr(settings, "email_from", "CROWND <no-reply@example.test>")
+    monkeypatch.setattr(settings, "smtp_username", None)
+    monkeypatch.setattr(settings, "smtp_starttls", False)
+    class TransientSMTP:
+        def __init__(self, *_args, **_kwargs): raise smtplib.SMTPConnectError(421, b"private temporary response")
+    monkeypatch.setattr(smtplib, "SMTP", TransientSMTP)
+    with pytest.raises(EmailDeliveryError) as transient:
+        SMTPEmailProvider().send(OutgoingEmail("buyer@example.test", "Subject", "Body"))
+    assert transient.value.category == "provider_temporary" and transient.value.retryable is True
+    class RejectedSMTP:
+        def __init__(self, *_args, **_kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+        def send_message(self, _message): raise smtplib.SMTPRecipientsRefused({"buyer@example.test": (550, b"private rejection")})
+    monkeypatch.setattr(smtplib, "SMTP", RejectedSMTP)
+    with pytest.raises(EmailDeliveryError) as permanent:
+        SMTPEmailProvider().send(OutgoingEmail("buyer@example.test", "Subject", "Body"))
+    assert permanent.value.category == "recipient_rejected" and permanent.value.retryable is False
+    assert "private rejection" not in str(permanent.value)
 
 
 def test_worker_disabled_provider_suppresses_without_claiming_delivery(notification_client, monkeypatch):

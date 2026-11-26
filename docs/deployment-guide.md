@@ -2,7 +2,7 @@
 
 ## Local containers
 
-`docker compose up --build` starts PostgreSQL 16, FastAPI with reviewed Alembic upgrades, the separate SQL notification worker, React static hosting/Nginx, and a local Mailpit SMTP sink. The SPA is on `http://localhost:8080`, API docs on `http://localhost:8000/docs`, and local inbox on `http://localhost:8025`. Mailpit is a local sink only; its messages are not sent to external recipients. Configure `JWT_SECRET`, `POSTGRES_PASSWORD`, exact local CORS/frontend origin and trusted proxy settings before sharing beyond a development workstation.
+Copy the root `.env.example` to `.env`, replace local placeholders, then run `docker compose up --build`. This starts PostgreSQL 16, a one-shot Alembic migration service, API, separate SQL notification worker, and Nginx SPA at `http://localhost:8080`; API routes are same-origin under `/api/v1` and the API/docs ports are not published directly. Compose defaults to disabled email. To add the local-only Mailpit inbox on `http://localhost:8025`, enable the `dev-mail` profile and explicitly set the local Mailpit SMTP values described in the root `.env.example`. Mailpit messages are not delivered externally. Compose is for local development, not production. See the [Phase 10 deployment guide](PHASE_10_DEPLOYMENT_GUIDE.md), [audit](PHASE_10_DEPLOYMENT_AUDIT.md), [backup/recovery runbook](DATABASE_BACKUP_AND_RECOVERY.md), and [production readiness checklist](PRODUCTION_READINESS_CHECKLIST.md).
 
 ## Hosted deployment readiness
 

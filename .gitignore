@@ -10,4 +10,11 @@ backend/*.db
 frontend/node_modules/
 frontend/dist/
 *.tsbuildinfo
+.coverage
+htmlcov/
+backups/
+*.dump
+*.dump.age
+*.dump.tmp
+npm-debug.log*
 .DS_Store

@@ -289,7 +289,8 @@ def remove_cart_item(item_id: int, request: Request, response: Response, db: Ses
 
 
 @router.delete("/cart", status_code=204)
-def clear_cart(db: Session = Depends(get_db), user: User = Depends(current_user)):
+@limiter.limit("30/minute")
+def clear_cart(request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(current_user)):
     cart = db.scalar(select(Cart).where(Cart.user_id == user.id))
     if cart:
         db.execute(CartItem.__table__.delete().where(CartItem.cart_id == cart.id))
@@ -446,7 +447,8 @@ def list_orders(db: Session = Depends(get_db), user: User = Depends(current_user
 
 
 @router.get("/admin/orders")
-def admin_list_orders(q: str | None = Query(default=None, max_length=120), status: str | None = None, payment_status: str | None = None, payment_method: str | None = None, page: int = Query(default=1, ge=1), page_size: int = Query(default=25, ge=1, le=100), db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
+@limiter.limit("60/minute")
+def admin_list_orders(request: Request, response: Response, q: str | None = Query(default=None, max_length=120), status: str | None = None, payment_status: str | None = None, payment_method: str | None = None, page: int = Query(default=1, ge=1), page_size: int = Query(default=25, ge=1, le=100), db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
     stmt = select(Order)
     if q:
         term = f"%{q.strip()}%"
@@ -463,7 +465,8 @@ def admin_list_orders(q: str | None = Query(default=None, max_length=120), statu
 
 
 @router.get("/admin/orders/{order_id}")
-def admin_get_order(order_id: str, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
+@limiter.limit("60/minute")
+def admin_get_order(order_id: str, request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
     order = db.scalar(select(Order).where(Order.public_id == order_id))
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -471,7 +474,8 @@ def admin_get_order(order_id: str, db: Session = Depends(get_db), user: User = D
 
 
 @router.post("/admin/orders/{order_id}/collect-payment")
-def admin_collect_cod_payment(order_id: str, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
+@limiter.limit("10/minute")
+def admin_collect_cod_payment(order_id: str, request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
     order = db.scalar(select(Order).where(Order.public_id == order_id).with_for_update())
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -573,7 +577,8 @@ def cancel_order(order_id: str, request: Request, response: Response, db: Sessio
 
 
 @router.post("/admin/orders/{order_id}/cancel")
-def admin_cancel_order(order_id: str, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
+@limiter.limit("10/minute")
+def admin_cancel_order(order_id: str, request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
     order = db.scalar(select(Order).where(Order.public_id == order_id).with_for_update())
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")

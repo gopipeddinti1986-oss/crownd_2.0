@@ -1,11 +1,12 @@
 from datetime import datetime, timezone, timedelta
+import logging
 from decimal import Decimal, ROUND_HALF_UP
 from uuid import uuid4
 import re, secrets
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func, delete, update, or_, and_
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from app.database import get_db
 from app.models.entities import *
 from app.api.v1.auth import limiter
@@ -38,7 +39,21 @@ def audit(db, actor, action, kind, entity):
     db.add(AuditLog(actor_id=actor.id if actor else None, action=action, entity_type=kind, entity_id=str(entity)))
 
 @router.get("/health")
-def health(): return {"status":"ok", "service":"crownd-api"}
+@router.get("/health/live")
+def health_liveness():
+    """Process liveness only; dependency state is reported by `/health/ready`."""
+    return {"status": "ok", "service": "crownd-api"}
+
+
+@router.get("/health/ready")
+def health_readiness(db: Session = Depends(get_db)):
+    """Cheap DB connectivity check. Does not reveal DSNs or migration details."""
+    try:
+        db.execute(select(1))
+    except SQLAlchemyError as exc:
+        logging.getLogger("crownd.health").warning("Readiness check failed type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Service is not ready") from None
+    return {"status": "ready", "dependencies": {"database": "ok"}}
 
 @router.get("/creators")
 def creators(q:str|None=None,niche:str|None=None,platform:str|None=None,limit:int=Query(30,ge=1,le=100),offset:int=0,db:Session=Depends(get_db),user:User=Depends(current_user)):
@@ -191,7 +206,8 @@ def my_referrals(db:Session=Depends(get_db),user:User=Depends(require_role("crea
 
 
 @router.post("/referrals/links",status_code=201)
-def create_referral_link(body:ReferralLinkCreate,db:Session=Depends(get_db),user:User=Depends(require_role("creator"))):
+@limiter.limit("10/minute")
+def create_referral_link(body:ReferralLinkCreate,request:Request,response:Response,db:Session=Depends(get_db),user:User=Depends(require_role("creator"))):
     campaign=db.get(Campaign,body.campaign_id)
     if not campaign or not campaign_is_active(campaign): raise HTTPException(409,"Campaign is not currently eligible for referral links")
     application=db.scalar(select(Application).where(Application.campaign_id==campaign.id,Application.creator_id==user.id))
@@ -240,7 +256,8 @@ def get_creator_referral_link(referral_id:int,db:Session=Depends(get_db),user:Us
 
 
 @router.patch("/referrals/links/{referral_id}")
-def update_creator_referral_link(referral_id:int,body:ReferralLinkUpdate,db:Session=Depends(get_db),user:User=Depends(require_role("creator"))):
+@limiter.limit("20/minute")
+def update_creator_referral_link(referral_id:int,body:ReferralLinkUpdate,request:Request,response:Response,db:Session=Depends(get_db),user:User=Depends(require_role("creator"))):
     ref=db.scalar(select(Referral).where(Referral.id==referral_id,Referral.creator_id==user.id).with_for_update())
     if not ref: raise HTTPException(404,"Referral link not found")
     campaign=db.get(Campaign,ref.campaign_id)
@@ -373,7 +390,8 @@ def brand_campaign_analytics(campaign_id:int,days:int=Query(default=30,ge=1,le=3
 
 
 @router.get("/admin/referrals")
-def admin_referrals(q:str|None=Query(default=None,max_length=100),creator_id:int|None=Query(default=None,gt=0),campaign_id:int|None=Query(default=None,gt=0),product_id:int|None=Query(default=None,gt=0),active:bool|None=None,page:int=Query(default=1,ge=1),page_size:int=Query(default=25,ge=1,le=100),db:Session=Depends(get_db),user:User=Depends(require_role("admin"))):
+@limiter.limit("60/minute")
+def admin_referrals(request:Request,response:Response,q:str|None=Query(default=None,max_length=100),creator_id:int|None=Query(default=None,gt=0),campaign_id:int|None=Query(default=None,gt=0),product_id:int|None=Query(default=None,gt=0),active:bool|None=None,page:int=Query(default=1,ge=1),page_size:int=Query(default=25,ge=1,le=100),db:Session=Depends(get_db),user:User=Depends(require_role("admin"))):
     stmt=select(Referral,Campaign).join(Campaign,Campaign.id==Referral.campaign_id)
     if q: stmt=stmt.where(Referral.code.ilike(f"%{q.strip()}%"))
     if creator_id: stmt=stmt.where(Referral.creator_id==creator_id)
@@ -392,7 +410,8 @@ def admin_referrals(q:str|None=Query(default=None,max_length=100),creator_id:int
 
 
 @router.patch("/admin/referrals/links/{referral_id}")
-def admin_update_referral_link(referral_id:int,body:ReferralLinkUpdate,db:Session=Depends(get_db),user:User=Depends(require_role("admin"))):
+@limiter.limit("10/minute")
+def admin_update_referral_link(referral_id:int,body:ReferralLinkUpdate,request:Request,response:Response,db:Session=Depends(get_db),user:User=Depends(require_role("admin"))):
     ref=db.scalar(select(Referral).where(Referral.id==referral_id).with_for_update())
     if not ref: raise HTTPException(404,"Referral link not found")
     if body.active:
@@ -404,7 +423,8 @@ def admin_update_referral_link(referral_id:int,body:ReferralLinkUpdate,db:Sessio
 
 
 @router.get("/admin/conversions")
-def admin_conversions(q:str|None=Query(default=None,max_length=100),status:str|None=None,creator_id:int|None=Query(default=None,gt=0),campaign_id:int|None=Query(default=None,gt=0),product_id:int|None=Query(default=None,gt=0),page:int=Query(default=1,ge=1),page_size:int=Query(default=25,ge=1,le=100),db:Session=Depends(get_db),user:User=Depends(require_role("admin"))):
+@limiter.limit("60/minute")
+def admin_conversions(request:Request,response:Response,q:str|None=Query(default=None,max_length=100),status:str|None=None,creator_id:int|None=Query(default=None,gt=0),campaign_id:int|None=Query(default=None,gt=0),product_id:int|None=Query(default=None,gt=0),page:int=Query(default=1,ge=1),page_size:int=Query(default=25,ge=1,le=100),db:Session=Depends(get_db),user:User=Depends(require_role("admin"))):
     stmt=select(Conversion,Order).join(Order,Order.id==Conversion.order_id)
     if status:
         if status not in {"pending","confirmed","cancelled","reversed","ineligible"}: raise HTTPException(422,"Unsupported conversion status")
@@ -423,7 +443,8 @@ def admin_conversions(q:str|None=Query(default=None,max_length=100),status:str|N
 
 
 @router.get("/admin/referral-risk")
-def admin_referral_risk(status:str="open",risk_code:str|None=None,creator_id:int|None=Query(default=None,gt=0),campaign_id:int|None=Query(default=None,gt=0),product_id:int|None=Query(default=None,gt=0),page:int=Query(default=1,ge=1),page_size:int=Query(default=25,ge=1,le=100),db:Session=Depends(get_db),user:User=Depends(require_role("admin"))):
+@limiter.limit("60/minute")
+def admin_referral_risk(request:Request,response:Response,status:str="open",risk_code:str|None=None,creator_id:int|None=Query(default=None,gt=0),campaign_id:int|None=Query(default=None,gt=0),product_id:int|None=Query(default=None,gt=0),page:int=Query(default=1,ge=1),page_size:int=Query(default=25,ge=1,le=100),db:Session=Depends(get_db),user:User=Depends(require_role("admin"))):
     if status not in {"open","reviewed","dismissed","all"}: raise HTTPException(422,"Unsupported risk status")
     stmt=select(ReferralRiskFlag)
     if status!="all": stmt=stmt.where(ReferralRiskFlag.status==status)
@@ -441,7 +462,8 @@ def admin_referral_risk(status:str="open",risk_code:str|None=None,creator_id:int
 
 
 @router.patch("/admin/referral-risk/{flag_id}")
-def review_referral_risk(flag_id:int,body:ReferralRiskReview,db:Session=Depends(get_db),user:User=Depends(require_role("admin"))):
+@limiter.limit("10/minute")
+def review_referral_risk(flag_id:int,body:ReferralRiskReview,request:Request,response:Response,db:Session=Depends(get_db),user:User=Depends(require_role("admin"))):
     risk=db.get(ReferralRiskFlag,flag_id)
     if not risk: raise HTTPException(404,"Risk flag not found")
     previous=risk.status
