@@ -1,4 +1,4 @@
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 import hashlib
 import hmac
@@ -11,13 +11,13 @@ from sqlalchemy.orm import Session
 from app.api.v1.auth import limiter
 from app.core.config import settings
 from app.database import get_db
-from app.models.entities import AuditLog, BrandProfile, Campaign, CampaignProduct, Cart, CartItem, Click, Conversion, ConversionEvent, LedgerEntry, Order, OrderItem, PaymentAttempt, Product, Referral, ReferralActivity, ReferralRiskFlag, Reward, User, VisitorAttribution
+from app.models.entities import AuditLog, BrandProfile, Campaign, Cart, CartItem, Conversion, Order, OrderItem, PaymentAttempt, Product, Referral, ReferralActivity, User
 from app.schemas.commerce import CartItemRequest, CartQuantityRequest, CheckoutRequest, OrderStatusUpdate
 from app.security import current_user, require_role
 from app.services.payments import process_demo_payment
-from app.services.rewards import calculate_reward
 from app.services.referrals import attribution_state, campaign_is_active, eligible_product_ids, referral_eligibility, signed_referral_from_request, track_activity, visitor_hash
-from app.services.conversions import create_conversion, flag_risk, transition_conversion
+from app.services.conversions import create_conversion, transition_conversion
+from app.services.rewards_engine import cancel_pending_collection_rewards, collect_cod_rewards, generate_order_rewards, self_referral
 
 router = APIRouter()
 REFERRAL_COOKIE = "crownd_referral"
@@ -113,22 +113,6 @@ def _validate_referral_for_products(db: Session, referral: Referral | None, prod
     if referral is None:
         return None
     return referral if all(referral_eligibility(db, referral, product)[0] for product in products) else None
-
-
-def _create_referral_reward(db: Session, order: Order, *, is_demo: bool) -> None:
-    conversion = db.scalar(select(Conversion).where(Conversion.order_id == order.id))
-    if not conversion or conversion.status != "confirmed" or conversion.attributed_amount <= 0 or db.scalar(select(Reward.id).where(Reward.order_id == order.id)):
-        return
-    referral = db.get(Referral, conversion.referral_id) if conversion.referral_id else None
-    campaign = db.get(Campaign, conversion.campaign_id) if conversion.campaign_id else None
-    if not referral or not campaign or (conversion.status == "ineligible"):
-        return
-    reward_amount = calculate_reward(Decimal(conversion.attributed_amount), campaign.reward_model, Decimal(campaign.reward_rate))
-    budget_used = db.scalar(select(func.coalesce(func.sum(Reward.amount), 0)).join(Order, Reward.order_id == Order.id).where(Order.referral_id == referral.id)) or Decimal("0")
-    if reward_amount <= 0 or (campaign.budget > 0 and Decimal(str(budget_used)) + reward_amount > Decimal(campaign.budget)):
-        return
-    db.add(Reward(order_id=order.id, creator_id=referral.creator_id, amount=reward_amount, status="pending", eligible_at=datetime.now(timezone.utc) + timedelta(days=30), is_demo=is_demo))
-    db.add(LedgerEntry(reference=order.public_id, user_id=referral.creator_id, entry_type="demo_reward_pending" if is_demo else "reward_pending", amount=reward_amount))
 
 
 def _conversion_for_order(db: Session, order: Order) -> Conversion | None:
@@ -255,12 +239,17 @@ def add_cart_item(body: CartItemRequest, request: Request, response: Response, d
     if desired > min(product.stock, 99):
         db.rollback()
         raise HTTPException(status_code=409, detail=f"Only {product.stock} item(s) are currently available")
+    referral = _get_attribution(request, db)
+    eligible_referral = referral if referral and referral_eligibility(db, referral, product)[0] else None
     if item:
         item.quantity = desired
+        # A direct add never erases attribution; a new eligible referral at this
+        # product touch may replace the item's previous referral.
+        if eligible_referral: item.referral_id = eligible_referral.id
     else:
-        db.add(CartItem(cart_id=cart.id, product_id=product.id, quantity=desired))
+        db.add(CartItem(cart_id=cart.id, product_id=product.id, quantity=desired, referral_id=eligible_referral.id if eligible_referral else None))
     cart.updated_at = datetime.now(timezone.utc)
-    track_activity(db, request, _get_attribution(request, db), product, "cart_add")
+    track_activity(db, request, referral, product, "cart_add")
     db.commit()
     db.refresh(cart)
     return _cart_payload(db, cart, request)
@@ -331,11 +320,13 @@ def checkout(body: CheckoutRequest, request: Request, response: Response, idempo
     if visitor_state and visitor_state.customer_id is None:
         visitor_state.customer_id = user.id
     address = body.shipping_address
-    order = Order(public_id="CR-" + uuid4().hex[:12].upper(), customer_name=address.name, customer_email=user.email, customer_id=user.id, idempotency_key=idempotency_key, product_id=products[0].id, quantity=rows[0][0].quantity, amount=subtotal, currency="INR", payment_method=body.payment_method, referral_id=referral.id if referral else None, payment_status="pending" if body.payment_method == "demo" else "unpaid", status="pending" if body.payment_method == "demo" else "confirmed", shipping_name=address.name, shipping_phone=address.phone, shipping_line1=address.line1, shipping_line2=address.line2, shipping_city=address.city, shipping_state=address.state, shipping_postal_code=address.postal_code, shipping_country=address.country)
+    order = Order(public_id="CR-" + uuid4().hex[:12].upper(), customer_name=address.name, customer_email=user.email, customer_id=user.id, idempotency_key=idempotency_key, product_id=products[0].id, quantity=rows[0][0].quantity, amount=subtotal, currency="INR", payment_method=body.payment_method, referral_id=None, payment_status="pending" if body.payment_method == "demo" else "unpaid", status="pending" if body.payment_method == "demo" else "confirmed", shipping_name=address.name, shipping_phone=address.phone, shipping_line1=address.line1, shipping_line2=address.line2, shipping_city=address.city, shipping_state=address.state, shipping_postal_code=address.postal_code, shipping_country=address.country)
     db.add(order)
     db.flush()
     attributed_amount = Decimal("0.00")
     eligible_product_count = 0
+    self_referral_seen = False
+    selected_line_refs: list[Referral] = []
     for item, product, profile in rows:
         changed = db.execute(update(Product).where(Product.id == product.id, Product.status == "active", Product.stock >= item.quantity).values(stock=Product.stock - item.quantity).execution_options(synchronize_session=False))
         if changed.rowcount != 1:
@@ -344,20 +335,33 @@ def checkout(body: CheckoutRequest, request: Request, response: Response, idempo
         unit = _unit_price(product)
         brand = profile.name if profile else _brand_name(db, product)
         line_total = _money(unit * item.quantity)
-        item_referral_id = None
-        if referral:
-            eligible, _eligibility_reason = referral_eligibility(db, referral, product)
-            if eligible:
-                item_referral_id = referral.id
+        saved_referral = db.get(Referral, item.referral_id) if item.referral_id else None
+        # The current valid touch can replace attribution on an eligible item;
+        # otherwise retain the item-level referral captured when it was added.
+        item_referral = None
+        for candidate in (referral, saved_referral):
+            if candidate and referral_eligibility(db, candidate, product)[0]:
+                item_referral = candidate
+                break
+        item_referral_id = item_referral.id if item_referral else None
+        if item_referral:
+            selected_line_refs.append(item_referral)
+            if self_referral(db,item_referral,user):
+                self_referral_seen = True
+            else:
                 attributed_amount += line_total
                 eligible_product_count += 1
         db.add(OrderItem(order_id=order.id, product_id=product.id, product_name=product.name, brand_name=brand, image_url=product.image_url, unit_price=unit, quantity=item.quantity, line_total=line_total, referral_id=item_referral_id))
         db.delete(item)
 
+    # Keep the order-level referral as a compatibility summary while rewards use
+    # each order line's validated referral (multiple creators can share one order).
+    primary_referral = referral if referral and any(ref.id==referral.id for ref in selected_line_refs) else (selected_line_refs[0] if selected_line_refs else None)
+    order.referral_id = primary_referral.id if primary_referral else None
     conversion = None
-    if referral:
-        conversion = create_conversion(db, order, referral, visitor_hash=visitor_id, attributed_amount=attributed_amount, eligible_product_count=eligible_product_count, customer=user)
-
+    if primary_referral:
+        conversion = create_conversion(db, order, primary_referral, visitor_hash=visitor_id, attributed_amount=attributed_amount,
+            eligible_product_count=eligible_product_count, customer=user, self_referral_only=self_referral_seen and eligible_product_count==0)
     if body.payment_method == "demo":
         force_failure = request.headers.get("X-Demo-Payment-Test-Failure", "").lower() == "true"
         if force_failure and settings.app_env == "production":
@@ -377,7 +381,7 @@ def checkout(body: CheckoutRequest, request: Request, response: Response, idempo
             transition_conversion(db, conversion, "cancelled", event_key=f"demo-failed:{order.id}", event_type="payment_failed", reason="demo_payment_failed")
         else:
             transition_conversion(db, conversion, "confirmed", event_key=f"demo-confirmed:{order.id}", event_type="demo_payment_confirmed", reason="simulated_success")
-            _create_referral_reward(db, order, is_demo=True)
+            generate_order_rewards(db,order,stage="demo")
     else:
         db.add(PaymentAttempt(order_id=order.id, attempt_number=1, idempotency_key=idempotency_key, payment_method="cod", status="unpaid", amount=subtotal, currency="INR", notes="Payment will be collected on delivery."))
 
@@ -471,7 +475,7 @@ def admin_collect_cod_payment(order_id: str, db: Session = Depends(get_db), user
     db.expire(order)
     conversion = _conversion_for_order(db, order)
     transition_conversion(db, conversion, "confirmed", event_key=f"cod-collected:{order.id}", event_type="cod_collection_confirmed", actor_id=user.id)
-    _create_referral_reward(db, order, is_demo=False)
+    collect_cod_rewards(db,order,user.id)
     db.add(AuditLog(actor_id=user.id, action="order.cod_payment_collected", entity_type="order", entity_id=order.public_id))
     db.commit()
     db.refresh(order)
@@ -519,6 +523,7 @@ def _cancel_order_record(db: Session, order: Order, actor: User) -> dict:
         db.add(AuditLog(actor_id=actor.id, action="order.cancelled_by_admin", entity_type="order", entity_id=order.public_id))
     conversion = _conversion_for_order(db, order)
     transition_conversion(db, conversion, "cancelled", event_key=f"order-cancelled:{order.id}", event_type="order_cancelled", actor_id=actor.id, reason="order_cancelled")
+    cancel_pending_collection_rewards(db,order,actor.id)
     db.commit()
     return _order_payload(db, order)
 

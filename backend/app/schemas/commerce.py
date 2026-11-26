@@ -131,6 +131,40 @@ class ReferralRiskReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
     status: str = Field(pattern=r"^(reviewed|dismissed)$")
 
+class RewardRuleCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    campaign_id: int = Field(gt=0)
+    product_id: int | None = Field(default=None, gt=0)
+    reward_type: Literal["percentage", "fixed"]
+    rate: Decimal | None = Field(default=None, ge=0, le=100, max_digits=7, decimal_places=3)
+    fixed_amount: Decimal | None = Field(default=None, gt=0, max_digits=12, decimal_places=2)
+    currency: Literal["INR"] = "INR"
+    minimum_eligible_amount: Decimal = Field(default=Decimal("0.00"), ge=0, max_digits=12, decimal_places=2)
+    max_reward: Decimal | None = Field(default=None, gt=0, max_digits=12, decimal_places=2)
+    max_creator_total: Decimal | None = Field(default=None, gt=0, max_digits=14, decimal_places=2)
+    max_campaign_total: Decimal | None = Field(default=None, gt=0, max_digits=14, decimal_places=2)
+    active: bool = True
+    valid_from: datetime | None = None
+    valid_until: datetime | None = None
+
+class RewardRuleUpdate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    reward_type: Literal["percentage", "fixed"] | None = None
+    rate: Decimal | None = Field(default=None, ge=0, le=100, max_digits=7, decimal_places=3)
+    fixed_amount: Decimal | None = Field(default=None, gt=0, max_digits=12, decimal_places=2)
+    currency: Literal["INR"] | None = None
+    minimum_eligible_amount: Decimal | None = Field(default=None, ge=0, max_digits=12, decimal_places=2)
+    max_reward: Decimal | None = Field(default=None, gt=0, max_digits=12, decimal_places=2)
+    max_creator_total: Decimal | None = Field(default=None, gt=0, max_digits=14, decimal_places=2)
+    max_campaign_total: Decimal | None = Field(default=None, gt=0, max_digits=14, decimal_places=2)
+    active: bool | None = None
+    valid_from: datetime | None = None
+    valid_until: datetime | None = None
+
+class RewardReviewAction(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    reason: str | None = Field(default=None, max_length=240)
+
 class OrderStatusUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     status: str = Field(pattern=r"^(confirmed|processing|shipped|delivered)$")

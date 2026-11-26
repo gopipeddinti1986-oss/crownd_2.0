@@ -257,7 +257,7 @@ def test_campaign_application_referral_order_and_reward(client,emails):
     order=client.post("/api/v1/checkout",headers={**customer,"Idempotency-Key":"campaign-demo-order-001"},json={"shipping_address":address,"payment_method":"demo"})
     assert order.status_code==201 and order.json()["payment_status"]=="paid" and order.json()["payment_method"]=="demo"
     reward=client.get("/api/v1/rewards/me",headers=creator).json()
-    assert len(reward)==1 and reward[0]["amount"]==200.0 and reward[0]["status"]=="pending" and reward[0]["is_demo"] is True
+    assert len(reward)==1 and reward[0]["amount"]==200.0 and reward[0]["status"]=="simulated" and reward[0]["is_demo"] is True and reward[0]["payable"] is False
 
 def test_campaign_duplicate_application_prevented(client,emails):
     _,brand=verified_login(client,emails,"dupbrand@test.example","brand","Dup Brand")

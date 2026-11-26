@@ -16,11 +16,13 @@ from app.core.config import settings
 from app.services.rewards import calculate_reward
 from app.api.v1.auth import router as auth_router
 from app.api.v1.commerce import router as commerce_router
+from app.api.v1.rewards import router as rewards_router
 from app.schemas.commerce import CampaignCreate, CampaignProductsUpdate, ProductCreate, ReferralLinkCreate, ReferralLinkUpdate, ReferralRiskReview
 
 router = APIRouter()
 router.include_router(auth_router)
 router.include_router(commerce_router)
+router.include_router(rewards_router)
 def slugify(s): return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-") + "-" + secrets.token_hex(3)
 def money(n): return Decimal(str(n)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 def audit(db, actor, action, kind, entity):
@@ -437,13 +439,9 @@ def list_orders(db:Session=Depends(get_db),user:User=Depends(current_user)):
 @router.get("/rewards/me")
 def my_rewards(db:Session=Depends(get_db),user:User=Depends(require_role("creator"))):
     return [{"id":r.id,"order_id":db.get(Order,r.order_id).public_id,"amount":float(r.amount),"status":r.status,"eligible_at":r.eligible_at.isoformat(),"is_demo":r.is_demo,"payable":not r.is_demo and r.status=="eligible"} for r in db.scalars(select(Reward).where(Reward.creator_id==user.id).order_by(Reward.created_at.desc())).all()]
-@router.post("/payouts")
-def request_payout(db:Session=Depends(get_db),user:User=Depends(require_role("creator"))):
-    available=db.scalar(select(func.coalesce(func.sum(Reward.amount),0)).where(Reward.creator_id==user.id,Reward.status=="eligible",Reward.is_demo.is_(False))) or Decimal(0)
-    pending=db.scalar(select(func.coalesce(func.sum(Payout.amount),0)).where(Payout.creator_id==user.id,Payout.status.in_(["requested","approved"]))) or Decimal(0)
-    amount=Decimal(str(available))-Decimal(str(pending))
-    if amount<Decimal(settings.minimum_payout): raise HTTPException(409,f"Eligible balance must be at least ₹{settings.minimum_payout}")
-    payout=Payout(creator_id=user.id,amount=money(amount)); db.add(payout); db.flush(); audit(db,user,"payout.requested","payout",payout.id); db.commit(); return {"id":payout.id,"amount":float(payout.amount),"status":payout.status}
+@router.post("/payouts",status_code=410)
+def request_payout():
+    raise HTTPException(410,"Payout processing is not available. Only administrators can record clearly disclosed payout simulations; no money is transferred.")
 
 @router.get("/analytics/overview")
 def analytics(db:Session=Depends(get_db),user:User=Depends(current_user)):

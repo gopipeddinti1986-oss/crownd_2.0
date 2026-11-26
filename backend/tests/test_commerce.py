@@ -8,7 +8,7 @@ from sqlalchemy.pool import StaticPool
 from app.api.v1.auth import limiter
 from app.database import Base, get_db
 from app.main import app
-from app.models.entities import Application, BrandProfile, Campaign, CampaignProduct, Cart, CartItem, Click, Conversion, ConversionEvent, Order, OrderItem, PaymentAttempt, Product, Referral, ReferralActivity, ReferralRiskFlag, Reward, User, VisitorAttribution
+from app.models.entities import Application, BrandProfile, Campaign, CampaignProduct, Cart, CartItem, Click, Conversion, ConversionEvent, Order, OrderItem, PaymentAttempt, Product, Referral, ReferralActivity, ReferralRiskFlag, Reward, RewardRule, LedgerEntry, User, VisitorAttribution
 from app.core.config import settings
 from app.security import create_access_token, hash_password
 from app.services.auth import create_session
@@ -186,7 +186,7 @@ def test_referral_cookie_attribution_is_signed_and_validated_at_checkout(commerc
         assert demo_reward and demo_reward.is_demo is True
         demo_reward.status = "eligible"
         db.commit()
-    assert commerce_client.post("/api/v1/payouts", headers=creator_headers).status_code == 409
+    assert commerce_client.post("/api/v1/payouts", headers=creator_headers).status_code == 410
     # Tampering with the attribution cookie cannot assign an arbitrary referral.
     commerce_client.cookies.set("crownd_referral", "1.9999999999.forged")
     commerce_client.cookies.set("crownd_attribution", "forged.visitor.signature")
@@ -342,7 +342,9 @@ def test_cod_referral_reward_is_created_only_after_admin_collection(commerce_db,
     assert add_to_cart(commerce_client, customer, product_id).status_code == 201
     order = commerce_client.post("/api/v1/checkout", headers={**customer, "Idempotency-Key": "cod-referral-order-001"}, json={**address(), "payment_method": "cod"}).json()
     with commerce_db() as db:
-        assert db.scalar(select(Reward).where(Reward.order_id == db.scalar(select(Order.id).where(Order.public_id == order["id"])))) is None
+        order_row = db.scalar(select(Order).where(Order.public_id == order["id"]))
+        assert db.scalar(select(Reward).where(Reward.order_id == order_row.id)) is None
+        assert db.scalar(select(LedgerEntry.id).where(LedgerEntry.order_id == order_row.id)) is None
     for status in ("processing", "shipped", "delivered"):
         assert commerce_client.patch(f"/api/v1/orders/{order['id']}/status", headers=admin, json={"status": status}).status_code == 200
     assert commerce_client.post(f"/api/v1/admin/orders/{order['id']}/collect-payment", headers=admin).status_code == 200
@@ -352,6 +354,140 @@ def test_cod_referral_reward_is_created_only_after_admin_collection(commerce_db,
         assert reward and reward.creator_id == creator_id and reward.is_demo is False and reward.status == "pending"
     creator_rewards = commerce_client.get("/api/v1/rewards/me", headers=creator).json()
     assert len(creator_rewards) == 1 and creator_rewards[0]["is_demo"] is False and creator_rewards[0]["payable"] is False
+    reward_id = creator_rewards[0]["id"]
+    with commerce_db() as db:
+        reward = db.get(Reward, reward_id)
+        reward.eligible_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        db.commit()
+    assert commerce_client.post(f"/api/v1/admin/rewards/{reward_id}/approve", headers=admin, json={}).status_code == 200
+    payout = commerce_client.post(f"/api/v1/admin/rewards/{reward_id}/simulated-payout", headers=admin, json={"reason": "admin simulation"})
+    assert payout.status_code == 200 and payout.json()["actual_money_transferred"] is False
+    assert "no actual money was transferred" in payout.json()["disclosure"].lower()
+    assert commerce_client.post(f"/api/v1/admin/rewards/{reward_id}/simulated-payout", headers=admin, json={}).status_code == 409
+    reversed_reward = commerce_client.post(f"/api/v1/admin/rewards/{reward_id}/reverse", headers=admin, json={"reason": "test reversal"})
+    assert reversed_reward.status_code == 200 and reversed_reward.json()["status"] == "reversed"
+    with commerce_db() as db:
+        entries = db.scalars(select(LedgerEntry).where(LedgerEntry.reward_id == reward_id).order_by(LedgerEntry.id)).all()
+        assert [(entry.direction,entry.entry_type) for entry in entries] == [("credit","REWARD_PENDING"),("memo","SIMULATED_PAYOUT_RECORDED"),("debit","REWARD_REVERSED")]
+        with pytest.raises(ValueError,match="immutable"):
+            db.delete(entries[0])
+            db.flush()
+        db.rollback()
+        with commerce_db() as retry:
+            entry=retry.get(LedgerEntry,entries[0].id)
+            with pytest.raises(ValueError,match="immutable"):
+                entry.description="tampered"
+                retry.flush()
+
+
+def test_phase5_reward_rule_precedence_demo_disclosure_and_role_scoped_apis(commerce_db, commerce_client):
+    brand_id, brand = create_account(commerce_db, "Reward Brand", "phase5-brand@example.com", "brand")
+    creator_id, creator = create_account(commerce_db, "Reward Creator", "phase5-creator@example.com", "creator")
+    customer_id, customer = create_account(commerce_db, "Reward Customer", "phase5-customer@example.com", "customer")
+    _admin_id, admin = create_account(commerce_db, "Reward Admin", "phase5-admin@example.com", "admin")
+    product_id = create_product(commerce_db, brand_id, sale_price=None)
+    with commerce_db() as db:
+        campaign = Campaign(brand_id=brand_id, product_id=product_id, title="Rule precedence", slug="rule-precedence", description="", category="Beauty", platforms="Instagram", reward_model="percentage", reward_rate=Decimal("10"), budget=Decimal("500"), status="published")
+        db.add(campaign)
+        db.flush()
+        db.add(Application(campaign_id=campaign.id, creator_id=creator_id, status="accepted"))
+        db.add(Referral(campaign_id=campaign.id, creator_id=creator_id, code="PHASE5RULE", active=True))
+        db.commit()
+        campaign_id = campaign.id
+    created = commerce_client.post("/api/v1/admin/reward-rules", headers=admin, json={"campaign_id": campaign_id, "product_id": product_id, "reward_type": "percentage", "rate": "12.500", "max_reward": "25.00"})
+    assert created.status_code == 201, created.text
+    assert created.json()["scope_key"] == f"campaign:{campaign_id}:product:{product_id}"
+    assert commerce_client.get("/api/v1/admin/reward-rules", headers=brand).status_code == 403
+    assert commerce_client.get("/api/v1/admin/rewards", headers=creator).status_code == 403
+    assert commerce_client.post("/api/v1/payouts", headers=creator).status_code == 410
+    assert commerce_client.get("/api/v1/r/PHASE5RULE").status_code == 200
+    assert add_to_cart(commerce_client, customer, product_id).status_code == 201
+    order_response = commerce_client.post("/api/v1/checkout", headers={**customer, "Idempotency-Key": "phase5-rule-demo"}, json={**address(), "payment_method": "demo"})
+    assert order_response.status_code == 201
+    with commerce_db() as db:
+        order = db.scalar(select(Order).where(Order.customer_id == customer_id))
+        reward = db.scalar(select(Reward).where(Reward.order_id == order.id))
+        assert reward and reward.amount == Decimal("12.50")
+        assert reward.status == "simulated" and reward.is_demo is True
+        assert reward.calculation_snapshot["rule_source"] == "product_rule"
+        assert reward.calculation_snapshot["eligible_amount"] == "100.00"
+        assert reward.calculation_snapshot["rounding"] == "ROUND_HALF_UP"
+        reward_id=reward.id
+        ledger = db.scalars(select(LedgerEntry).where(LedgerEntry.reward_id == reward.id)).all()
+        assert len(ledger) == 1 and ledger[0].direction == "memo" and ledger[0].idempotency_key
+    updated_rule=commerce_client.put(f"/api/v1/admin/reward-rules/{created.json()['id']}",headers=admin,json={"rate":"20.000"})
+    assert updated_rule.status_code==200 and updated_rule.json()["rate"]=="20.000"
+    with commerce_db() as db:
+        saved_reward=db.get(Reward,reward_id)
+        assert saved_reward.amount==Decimal("12.50") and saved_reward.calculation_snapshot["rate"]=="12.500"
+        db.add(ReferralRiskFlag(risk_code="TEST_PRIVACY",referral_id=saved_reward.referral_id,conversion_id=saved_reward.conversion_id,details="Customer email: private@example.test",status="open"))
+        db.commit()
+    listing = commerce_client.get("/api/v1/creator/rewards", headers=creator)
+    assert listing.status_code == 200 and listing.json()["total"] == 1
+    assert listing.json()["items"][0]["payable"] is False
+    assert listing.json()["items"][0]["payout_disclosure"].startswith("CROWND does not transfer money")
+    assert "customer_email" not in str(listing.json()) and "shipping_address" not in str(listing.json())
+    creator_detail=commerce_client.get(f"/api/v1/creator/rewards/{reward_id}",headers=creator).json()
+    assert creator_detail["risk_flags"][0]["details"] is None
+    admin_detail=commerce_client.get(f"/api/v1/admin/rewards/{reward_id}",headers=admin).json()
+    assert "private@example.test" in admin_detail["risk_flags"][0]["details"]
+    detail = commerce_client.get("/api/v1/admin/rewards", headers=admin)
+    assert detail.status_code == 200 and detail.json()["summary"]["actual_money_transferred"] is False
+    reward_id = listing.json()["items"][0]["id"]
+    assert commerce_client.post(f"/api/v1/admin/rewards/{reward_id}/approve", headers=admin, json={}).status_code == 409
+    assert commerce_client.post(f"/api/v1/admin/rewards/{reward_id}/simulated-payout", headers=admin, json={}).status_code == 409
+    assert commerce_client.post(f"/api/v1/admin/rewards/{reward_id}/approve", headers=brand, json={}).status_code == 403
+    assert commerce_client.get("/api/v1/brand/reward-analytics", headers=brand).status_code == 200
+
+
+def test_phase5_mixed_cart_creates_idempotent_item_attributed_rewards_for_multiple_creators(commerce_db, commerce_client):
+    brand_a,_=create_account(commerce_db,"Brand A","phase5-mixed-brand-a@example.com","brand")
+    brand_b,_=create_account(commerce_db,"Brand B","phase5-mixed-brand-b@example.com","brand")
+    creator_a,creator_headers_a=create_account(commerce_db,"Creator A","phase5-mixed-creator-a@example.com","creator")
+    creator_b,creator_headers_b=create_account(commerce_db,"Creator B","phase5-mixed-creator-b@example.com","creator")
+    customer_id,customer=create_account(commerce_db,"Mixed Cart Customer","phase5-mixed-customer@example.com","customer")
+    _admin_id,admin=create_account(commerce_db,"Mixed Cart Admin","phase5-mixed-admin@example.com","admin")
+    product_a=create_product(commerce_db,brand_a,name="Product A",slug="phase5-product-a",sale_price=None)
+    product_b=create_product(commerce_db,brand_b,name="Product B",slug="phase5-product-b",sale_price=None)
+    with commerce_db() as db:
+        campaign_a=Campaign(brand_id=brand_a,product_id=product_a,title="Campaign A",slug="phase5-campaign-a",description="",category="Beauty",platforms="Instagram",reward_model="percentage",reward_rate=Decimal("10"),budget=Decimal("5.00"),status="published")
+        campaign_b=Campaign(brand_id=brand_b,product_id=product_b,title="Campaign B",slug="phase5-campaign-b",description="",category="Beauty",platforms="Instagram",reward_model="percentage",reward_rate=Decimal("20"),budget=Decimal("500"),status="published")
+        db.add_all([campaign_a,campaign_b]);db.flush()
+        db.add_all([Application(campaign_id=campaign_a.id,creator_id=creator_a,status="accepted"),Application(campaign_id=campaign_b.id,creator_id=creator_b,status="accepted"),Referral(campaign_id=campaign_a.id,creator_id=creator_a,code="MIXA",active=True),Referral(campaign_id=campaign_b.id,creator_id=creator_b,code="MIXB",active=True)])
+        db.commit()
+    assert commerce_client.get("/api/v1/r/MIXA").status_code==200
+    assert add_to_cart(commerce_client,customer,product_a).status_code==201
+    assert commerce_client.get("/api/v1/r/MIXB").status_code==200
+    assert add_to_cart(commerce_client,customer,product_b).status_code==201
+    order_response=commerce_client.post("/api/v1/checkout",headers={**customer,"Idempotency-Key":"phase5-multi-creator-cart"},json={**address(),"payment_method":"cod"})
+    assert order_response.status_code==201
+    with commerce_db() as db:
+        order_before_collection=db.scalar(select(Order).where(Order.customer_id==customer_id))
+        assert db.scalar(select(Reward.id).where(Reward.order_id==order_before_collection.id)) is None
+    for status in ("processing","shipped","delivered"):
+        assert commerce_client.patch(f"/api/v1/orders/{order_response.json()['id']}/status",headers=admin,json={"status":status}).status_code==200
+    assert commerce_client.post(f"/api/v1/admin/orders/{order_response.json()['id']}/collect-payment",headers=admin).status_code==200
+    with commerce_db() as db:
+        order=db.scalar(select(Order).where(Order.customer_id==customer_id))
+        rewards=db.scalars(select(Reward).where(Reward.order_id==order.id).order_by(Reward.creator_id)).all()
+        assert len(rewards)==2 and {row.creator_id for row in rewards}=={creator_a,creator_b}
+        assert len({row.source_key for row in rewards})==2
+        assert all(not row.is_demo and row.status=="pending" for row in rewards)
+        assert {row.product_id for row in rewards}=={product_a,product_b}
+        assert {row.amount for row in rewards}=={Decimal("5.00"),Decimal("20.00")}
+        capped=db.scalar(select(Reward).where(Reward.order_id==order.id,Reward.product_id==product_a))
+        assert capped.calculation_snapshot["campaign_budget"]=="5.00" and capped.calculation_snapshot["campaign_budget_used_before"]=="0.00"
+        items=db.scalars(select(OrderItem).where(OrderItem.order_id==order.id)).all()
+        assert {item.referral_id for item in items}=={db.scalar(select(Referral.id).where(Referral.code=="MIXA")),db.scalar(select(Referral.id).where(Referral.code=="MIXB"))}
+    for headers in (creator_headers_a,creator_headers_b):
+        page=commerce_client.get("/api/v1/creator/rewards",headers=headers).json()
+        assert page["total"]==1 and page["items"][0]["is_demo"] is False
+        assert "customer_email" not in str(page) and "customer_id" not in str(page)
+    replay=commerce_client.post("/api/v1/checkout",headers={**customer,"Idempotency-Key":"phase5-multi-creator-cart"},json={**address(),"payment_method":"demo"})
+    assert replay.status_code==200
+    with commerce_db() as db:
+        assert db.scalar(select(func.count(Reward.id)))==2
+        assert db.scalar(select(func.count(LedgerEntry.id)).where(LedgerEntry.entry_type=="REWARD_PENDING"))==2
 
 
 def test_phase4_referral_link_click_mixed_cart_conversion_and_creator_analytics(commerce_db, commerce_client):
@@ -453,6 +589,8 @@ def test_phase4_cod_conversion_confirmed_only_after_collection_and_cancelled_his
         reward = db.scalar(select(Reward).where(Reward.order_id == order.id))
         assert conversion.status == "confirmed" and conversion.is_demo is False
         assert reward and reward.is_demo is False and reward.status == "pending"
+        ledger = db.scalars(select(LedgerEntry).where(LedgerEntry.order_id == order.id)).all()
+        assert len(ledger) == 1 and ledger[0].direction == "credit" and ledger[0].reward_id == reward.id
         assert db.scalar(select(func.count(ConversionEvent.id)).where(ConversionEvent.conversion_id == conversion.id)) == 2
     assert commerce_client.post(f"/api/v1/orders/{pending.json()['id']}/cancel", headers=customer).status_code == 409
 

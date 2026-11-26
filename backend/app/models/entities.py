@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from decimal import Decimal
-from sqlalchemy import String, Integer, Boolean, DateTime, ForeignKey, Numeric, Text, UniqueConstraint, Index, JSON, CheckConstraint
+from sqlalchemy import String, Integer, Boolean, DateTime, ForeignKey, Numeric, Text, UniqueConstraint, Index, JSON, CheckConstraint, event
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
@@ -275,6 +275,7 @@ class CartItem(Base):
     cart_id: Mapped[int] = mapped_column(ForeignKey("carts.id", ondelete="CASCADE"), index=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), index=True)
     quantity: Mapped[int] = mapped_column(Integer)
+    referral_id: Mapped[int | None] = mapped_column(ForeignKey("referrals.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
     __table_args__ = (UniqueConstraint("cart_id", "product_id", name="uq_cart_product"),)
@@ -292,26 +293,117 @@ class OrderItem(Base):
     line_total: Mapped[Decimal] = mapped_column(Numeric(12,2))
     referral_id: Mapped[int | None] = mapped_column(ForeignKey("referrals.id", ondelete="SET NULL"), nullable=True, index=True)
 
+class RewardRule(Base):
+    __tablename__ = "reward_rules"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    campaign_id: Mapped[int] = mapped_column(ForeignKey("campaigns.id", ondelete="CASCADE"), index=True)
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id", ondelete="RESTRICT"), nullable=True, index=True)
+    scope_key: Mapped[str] = mapped_column(String(80), unique=True)
+    reward_type: Mapped[str] = mapped_column(String(16))
+    rate: Mapped[Decimal | None] = mapped_column(Numeric(7,3), nullable=True)
+    fixed_amount: Mapped[Decimal | None] = mapped_column(Numeric(12,2), nullable=True)
+    currency: Mapped[str] = mapped_column(String(3), default="INR")
+    minimum_eligible_amount: Mapped[Decimal] = mapped_column(Numeric(12,2), default=Decimal("0.00"))
+    max_reward: Mapped[Decimal | None] = mapped_column(Numeric(12,2), nullable=True)
+    max_creator_total: Mapped[Decimal | None] = mapped_column(Numeric(14,2), nullable=True)
+    max_campaign_total: Mapped[Decimal | None] = mapped_column(Numeric(14,2), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    updated_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+    __table_args__ = (
+        CheckConstraint("reward_type IN ('percentage','fixed')", name="ck_reward_rule_type"),
+        CheckConstraint("currency = 'INR'", name="ck_reward_rule_currency"),
+        CheckConstraint("minimum_eligible_amount >= 0", name="ck_reward_rule_minimum"),
+        CheckConstraint("rate IS NULL OR (rate >= 0 AND rate <= 100)", name="ck_reward_rule_rate"),
+        CheckConstraint("fixed_amount IS NULL OR fixed_amount >= 0", name="ck_reward_rule_fixed"),
+    )
+
 class Reward(Base):
     __tablename__ = "rewards"
     id: Mapped[int] = mapped_column(primary_key=True)
-    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), unique=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id", ondelete="RESTRICT"), index=True)
     creator_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    brand_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    campaign_id: Mapped[int | None] = mapped_column(ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True, index=True)
+    conversion_id: Mapped[int | None] = mapped_column(ForeignKey("conversions.id", ondelete="SET NULL"), nullable=True, index=True)
+    referral_id: Mapped[int | None] = mapped_column(ForeignKey("referrals.id", ondelete="SET NULL"), nullable=True, index=True)
+    order_item_id: Mapped[int | None] = mapped_column(ForeignKey("order_items.id", ondelete="SET NULL"), nullable=True, index=True)
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id", ondelete="SET NULL"), nullable=True, index=True)
+    reward_rule_id: Mapped[int | None] = mapped_column(ForeignKey("reward_rules.id", ondelete="SET NULL"), nullable=True, index=True)
+    source_key: Mapped[str | None] = mapped_column(String(120), unique=True, nullable=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(12,2))
+    eligible_amount: Mapped[Decimal] = mapped_column(Numeric(12,2), default=Decimal("0.00"))
+    excluded_amount: Mapped[Decimal] = mapped_column(Numeric(12,2), default=Decimal("0.00"))
+    currency: Mapped[str] = mapped_column(String(3), default="INR")
+    reward_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    reward_rate: Mapped[Decimal | None] = mapped_column(Numeric(7,3), nullable=True)
+    fixed_amount: Mapped[Decimal | None] = mapped_column(Numeric(12,2), nullable=True)
+    calculation_formula: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    rounding_rule: Mapped[str] = mapped_column(String(32), default="ROUND_HALF_UP")
+    calculation_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    risk_status: Mapped[str] = mapped_column(String(20), default="clear", index=True)
     eligible_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     is_demo: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+class RewardEvent(Base):
+    __tablename__ = "reward_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    reward_id: Mapped[int] = mapped_column(ForeignKey("rewards.id", ondelete="RESTRICT"), index=True)
+    event_key: Mapped[str] = mapped_column(String(140))
+    event_type: Mapped[str] = mapped_column(String(32))
+    from_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    to_status: Mapped[str] = mapped_column(String(24))
+    reason: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    actor_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    __table_args__ = (UniqueConstraint("reward_id", "event_key", name="uq_reward_event_key"),)
 
 class LedgerEntry(Base):
     __tablename__ = "ledger_entries"
     id: Mapped[int] = mapped_column(primary_key=True)
     reference: Mapped[str] = mapped_column(String(80), index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    entry_type: Mapped[str] = mapped_column(String(32))
+    entry_type: Mapped[str] = mapped_column(String(40))
     amount: Mapped[Decimal] = mapped_column(Numeric(12,2))
     currency: Mapped[str] = mapped_column(String(3), default="INR")
+    direction: Mapped[str] = mapped_column(String(16), default="credit")
+    idempotency_key: Mapped[str | None] = mapped_column(String(140), unique=True, nullable=True)
+    reward_id: Mapped[int | None] = mapped_column(ForeignKey("rewards.id", ondelete="SET NULL"), nullable=True, index=True)
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id", ondelete="SET NULL"), nullable=True, index=True)
+    conversion_id: Mapped[int | None] = mapped_column(ForeignKey("conversions.id", ondelete="SET NULL"), nullable=True, index=True)
+    campaign_id: Mapped[int | None] = mapped_column(ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True, index=True)
+    reversal_of_id: Mapped[int | None] = mapped_column(ForeignKey("ledger_entries.id", ondelete="RESTRICT"), nullable=True, unique=True)
+    actor_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    description: Mapped[str] = mapped_column(String(240), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+class SimulatedPayout(Base):
+    __tablename__ = "simulated_payouts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    reward_id: Mapped[int] = mapped_column(ForeignKey("rewards.id", ondelete="RESTRICT"), unique=True, index=True)
+    creator_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), index=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(12,2))
+    currency: Mapped[str] = mapped_column(String(3), default="INR")
+    reference: Mapped[str] = mapped_column(String(80), unique=True)
+    actor_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    disclosure: Mapped[str] = mapped_column(String(120), default="Simulation only — no actual money was transferred.")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+def _deny_ledger_mutation(*_args):
+    raise ValueError("Ledger entries are immutable; append a reversal instead.")
+
+event.listen(LedgerEntry, "before_update", _deny_ledger_mutation)
+event.listen(LedgerEntry, "before_delete", _deny_ledger_mutation)
+event.listen(RewardEvent, "before_update", _deny_ledger_mutation)
+event.listen(RewardEvent, "before_delete", _deny_ledger_mutation)
 
 class Payout(Base):
     __tablename__ = "payouts"

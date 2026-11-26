@@ -25,7 +25,7 @@ def flag_risk(db: Session, risk_code: str, *, referral_id: int | None = None, co
     return db.scalar(select(ReferralRiskFlag).where(ReferralRiskFlag.risk_code == risk_code, ReferralRiskFlag.status == "open").order_by(ReferralRiskFlag.created_at.desc()))
 
 
-def create_conversion(db: Session, order: Order, referral: Referral, *, visitor_hash: str | None, attributed_amount: Decimal, eligible_product_count: int, customer: User) -> Conversion:
+def create_conversion(db: Session, order: Order, referral: Referral, *, visitor_hash: str | None, attributed_amount: Decimal, eligible_product_count: int, customer: User, self_referral_only: bool | None = None) -> Conversion:
     existing = db.scalar(select(Conversion).where(Conversion.order_id == order.id))
     if existing:
         return existing
@@ -33,7 +33,9 @@ def create_conversion(db: Session, order: Order, referral: Referral, *, visitor_
     reason = None
     status = "pending"
     amount = Decimal(attributed_amount).quantize(Decimal("0.01"))
-    if creator and (creator.id == customer.id or creator.email.strip().casefold() == customer.email.strip().casefold()):
+    matches_creator = bool(creator and (creator.id == customer.id or creator.email.strip().casefold() == customer.email.strip().casefold()))
+    self_only = matches_creator if self_referral_only is None else self_referral_only
+    if self_only:
         status, reason, amount = "ineligible", "self_referral", Decimal("0.00")
     elif eligible_product_count <= 0 or amount <= 0:
         status, reason, amount = "ineligible", "no_eligible_products", Decimal("0.00")
