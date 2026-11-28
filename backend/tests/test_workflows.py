@@ -423,6 +423,49 @@ def test_role_aware_account_profile_updates_are_validated_and_audited(client,ema
         assert db.scalar(select(func.count(AuditLog.id)).where(AuditLog.action=="account.profile_updated"))==4
 
 
+def test_creator_can_withdraw_pending_application_once_and_cannot_withdraw_accepted(client,emails,db_engine):
+    from sqlalchemy import func
+    from app.models.entities import Application, AuditLog, Notification, Referral
+
+    _,brand=verified_login(client,emails,"withdraw-brand@test.example","brand","Withdraw Brand")
+    _,creator=verified_login(client,emails,"withdraw-creator@test.example","creator","Withdraw Creator")
+    _,other_creator=verified_login(client,emails,"withdraw-other@test.example","creator","Other Creator")
+    campaign=client.post("/api/v1/campaigns",headers=brand,json={"title":"Withdrawal campaign"}).json()
+    assert client.patch(f"/api/v1/campaigns/{campaign['id']}/status",headers=brand,json={"status":"published"}).status_code==200
+    path=f"/api/v1/campaigns/{campaign['id']}/applications"
+    submitted=client.post(path,headers=creator,json={"message":"Please consider me"})
+    assert submitted.status_code==201
+    app_id=submitted.json()["id"]
+    withdraw_url=f"/api/v1/applications/{app_id}/withdraw"
+    assert client.post(withdraw_url,headers=other_creator).status_code==404
+    assert client.post(withdraw_url,headers=brand).status_code==403
+    first=client.post(withdraw_url,headers=creator)
+    assert first.status_code==200 and first.json()["status"]=="withdrawn"
+    replay=client.post(withdraw_url,headers=creator)
+    assert replay.status_code==200 and replay.json()["status"]=="withdrawn"
+    assert client.patch(f"/api/v1/applications/{app_id}",headers=brand,json={"status":"accepted"}).status_code==409
+    with sessionmaker(bind=db_engine)() as db:
+        row=db.get(Application,app_id)
+        brand_id=db.scalar(select(User.id).where(User.email=="withdraw-brand@test.example"))
+        assert row.status=="withdrawn"
+        assert db.scalar(select(func.count(Notification.id)).where(
+            Notification.recipient_id==brand_id,
+            Notification.event_key==f"application-withdrawn:{app_id}"))==1
+        assert db.scalar(select(func.count(AuditLog.id)).where(AuditLog.actor_id==row.creator_id,
+            AuditLog.action=="application.withdrawn",AuditLog.entity_id==str(app_id)))==1
+        assert not db.scalar(select(Referral.id).where(Referral.campaign_id==campaign["id"],
+            Referral.creator_id==row.creator_id,Referral.active.is_(True)))
+
+    accepted_app=client.post(path,headers=other_creator,json={"message":"I am available"})
+    assert accepted_app.status_code==201
+    assert client.patch(f"/api/v1/applications/{accepted_app.json()['id']}",headers=brand,json={"status":"accepted"}).status_code==200
+    assert client.post(f"/api/v1/applications/{accepted_app.json()['id']}/withdraw",headers=other_creator).status_code==409
+    with sessionmaker(bind=db_engine)() as db:
+        active_referral=db.scalar(select(Referral).where(Referral.campaign_id==campaign["id"],
+            Referral.creator_id==db.scalar(select(User.id).where(User.email=="withdraw-other@test.example"))))
+        assert active_referral and active_referral.active is True
+
+
 def test_application_payload_validation_owner_checks_and_idempotent_review(client,emails,db_engine):
     _,brand=verified_login(client,emails,"application-brand@test.example","brand","Application Brand")
     _,other_brand=verified_login(client,emails,"application-other-brand@test.example","brand","Other Brand")

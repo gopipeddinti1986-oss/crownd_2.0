@@ -239,6 +239,33 @@ def review_application(application_id:int,body:ApplicationReview,db:Session=Depe
             email_subject="Your campaign application was updated",email_body=notice)
     db.commit(); return {"id":a.id,"status":status}
 
+
+@router.post("/applications/{application_id}/withdraw")
+def withdraw_application(application_id:int,db:Session=Depends(get_db),user:User=Depends(current_user)):
+    if user.role!="creator":
+        raise HTTPException(403,"Only creators can withdraw their applications")
+    application=db.scalar(select(Application).where(Application.id==application_id).with_for_update())
+    if not application or application.creator_id!=user.id:
+        raise HTTPException(404,"Application not found")
+    if application.status=="withdrawn":
+        return {"id":application.id,"status":application.status}
+    if application.status not in {"pending","shortlisted"}:
+        raise HTTPException(409,"Only pending or shortlisted applications can be withdrawn")
+    campaign=db.get(Campaign,application.campaign_id)
+    application.status="withdrawn"
+    # A withdrawn application must not leave a usable referral link behind.
+    db.execute(update(Referral).where(Referral.campaign_id==application.campaign_id,
+        Referral.creator_id==application.creator_id).values(active=False))
+    audit(db,user,"application.withdrawn","application",application.id)
+    if campaign:
+        notice=f"A creator withdrew their application to {campaign.title}."
+        create_notification(db,recipient_id=campaign.brand_id,event_key=f"application-withdrawn:{application.id}",
+            category="application",title="Campaign application withdrawn",body=notice,action_path="/applications",
+            email_subject="A creator withdrew their campaign application",email_body=notice)
+    db.commit()
+    return {"id":application.id,"status":application.status}
+
+
 @router.post("/products",status_code=201)
 def create_product(body:ProductCreate,db:Session=Depends(get_db),user:User=Depends(require_role("brand"))):
     if body.sale_price is not None and body.sale_price >= body.price:
