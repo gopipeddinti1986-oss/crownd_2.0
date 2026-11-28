@@ -17,7 +17,7 @@ from app.security import current_user, require_role
 from app.services.payments import process_demo_payment
 from app.services.referrals import attribution_state, campaign_is_active, eligible_product_ids, referral_eligibility, signed_referral_from_request, track_activity, visitor_hash
 from app.services.conversions import create_conversion, transition_conversion
-from app.services.rewards_engine import cancel_pending_collection_rewards, collect_cod_rewards, generate_order_rewards, self_referral
+from app.services.rewards_engine import capture_reward_snapshot, cancel_pending_collection_rewards, collect_cod_rewards, generate_order_rewards, self_referral
 from app.services.notifications import create_notification
 
 router = APIRouter()
@@ -65,9 +65,17 @@ def _product_payload(db: Session, product: Product) -> dict:
 def _cart_for(db: Session, user: User) -> Cart:
     cart = db.scalar(select(Cart).where(Cart.user_id == user.id).with_for_update())
     if cart is None:
-        cart = Cart(user_id=user.id)
-        db.add(cart)
-        db.flush()
+        try:
+            # A savepoint lets simultaneous first-cart requests recover from the
+            # unique user_id constraint without aborting the outer transaction.
+            with db.begin_nested():
+                cart = Cart(user_id=user.id)
+                db.add(cart)
+                db.flush()
+        except IntegrityError:
+            cart = db.scalar(select(Cart).where(Cart.user_id == user.id).with_for_update())
+            if cart is None:
+                raise
     return cart
 
 
@@ -155,6 +163,35 @@ def _can_view_order(db: Session, order: Order, user: User) -> bool:
         referral = db.get(Referral, order.referral_id)
         return bool(referral and referral.creator_id == user.id)
     return False
+
+
+def _order_participants(db: Session, order: Order) -> tuple[set[int], set[int]]:
+    brand_ids: set[int] = set()
+    creator_ids: set[int] = set()
+    items = db.scalars(select(OrderItem).where(OrderItem.order_id == order.id).order_by(OrderItem.id)).all()
+    if not items:
+        product = db.get(Product, order.product_id) if order.product_id else None
+        if product:
+            brand_ids.add(product.brand_id)
+    for item in items:
+        snapshot = item.reward_snapshot or {}
+        if snapshot.get("brand_id"):
+            brand_ids.add(int(snapshot["brand_id"]))
+        elif item.product_id:
+            product = db.get(Product, item.product_id)
+            if product:
+                brand_ids.add(product.brand_id)
+        if item.referral_id:
+            referral = db.get(Referral, item.referral_id)
+            if referral:
+                creator_ids.add(referral.creator_id)
+            elif snapshot.get("creator_id"):
+                creator_ids.add(int(snapshot["creator_id"]))
+    if order.referral_id:
+        referral = db.get(Referral, order.referral_id)
+        if referral:
+            creator_ids.add(referral.creator_id)
+    return brand_ids, creator_ids
 
 
 @router.get("/products/categories")
@@ -290,6 +327,9 @@ def add_cart_item(body: CartItemRequest, request: Request, response: Response, d
     if not product or product.status != "active" or not seller or seller.role != "brand" or not seller.is_active:
         raise HTTPException(status_code=404, detail="Product is unavailable")
     cart = _cart_for(db, user)
+    # Serialize cart edits with checkout for this customer; checkout then locks
+    # products in stable ID order before reserving inventory.
+    cart = db.scalar(select(Cart).where(Cart.id == cart.id).with_for_update())
     item = db.scalar(select(CartItem).where(CartItem.cart_id == cart.id, CartItem.product_id == product.id).with_for_update())
     desired = body.quantity + (item.quantity if item else 0)
     if desired > min(product.stock, 99):
@@ -314,7 +354,10 @@ def add_cart_item(body: CartItemRequest, request: Request, response: Response, d
 @router.patch("/cart/items/{item_id}")
 @limiter.limit("30/minute")
 def update_cart_item(item_id: int, body: CartQuantityRequest, request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    item = db.scalar(select(CartItem).join(Cart, Cart.id == CartItem.cart_id).where(CartItem.id == item_id, Cart.user_id == user.id).with_for_update())
+    cart = db.scalar(select(Cart).where(Cart.user_id == user.id).with_for_update())
+    if not cart:
+        raise HTTPException(status_code=404, detail="Cart item not found")
+    item = db.scalar(select(CartItem).where(CartItem.id == item_id, CartItem.cart_id == cart.id).with_for_update())
     if not item:
         raise HTTPException(status_code=404, detail="Cart item not found")
     product = db.get(Product, item.product_id)
@@ -332,7 +375,8 @@ def update_cart_item(item_id: int, body: CartQuantityRequest, request: Request, 
 @router.delete("/cart/items/{item_id}", status_code=204)
 @limiter.limit("30/minute")
 def remove_cart_item(item_id: int, request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    item = db.scalar(select(CartItem).join(Cart, Cart.id == CartItem.cart_id).where(CartItem.id == item_id, Cart.user_id == user.id))
+    cart = db.scalar(select(Cart).where(Cart.user_id == user.id).with_for_update())
+    item = db.scalar(select(CartItem).where(CartItem.id == item_id, CartItem.cart_id == cart.id).with_for_update()) if cart else None
     if not item:
         raise HTTPException(status_code=404, detail="Cart item not found")
     db.delete(item)
@@ -342,7 +386,7 @@ def remove_cart_item(item_id: int, request: Request, response: Response, db: Ses
 @router.delete("/cart", status_code=204)
 @limiter.limit("30/minute")
 def clear_cart(request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    cart = db.scalar(select(Cart).where(Cart.user_id == user.id))
+    cart = db.scalar(select(Cart).where(Cart.user_id == user.id).with_for_update())
     if cart:
         db.execute(CartItem.__table__.delete().where(CartItem.cart_id == cart.id))
         db.commit()
@@ -360,9 +404,15 @@ def checkout(body: CheckoutRequest, request: Request, response: Response, idempo
         response.status_code = 200
         return _order_payload(db, previous)
     cart = db.scalar(select(Cart).where(Cart.user_id == user.id).with_for_update())
+    # Repeat after acquiring the per-customer cart lock: a concurrent request
+    # using this same idempotency key may have committed while we were waiting.
+    previous = db.scalar(select(Order).where(Order.customer_id == user.id, Order.idempotency_key == idempotency_key))
+    if previous:
+        response.status_code = 200
+        return _order_payload(db, previous)
     if not cart:
         raise HTTPException(status_code=409, detail="Your cart is empty")
-    rows = db.execute(select(CartItem, Product, BrandProfile).join(Product, Product.id == CartItem.product_id).outerjoin(BrandProfile, BrandProfile.user_id == Product.brand_id).where(CartItem.cart_id == cart.id).order_by(CartItem.id).with_for_update(of=[CartItem, Product])).all()
+    rows = db.execute(select(CartItem, Product, BrandProfile).join(Product, Product.id == CartItem.product_id).outerjoin(BrandProfile, BrandProfile.user_id == Product.brand_id).where(CartItem.cart_id == cart.id).order_by(Product.id, CartItem.id).with_for_update(of=[CartItem, Product])).all()
     if not rows:
         raise HTTPException(status_code=409, detail="Your cart is empty")
     products = [product for _, product, _ in rows]
@@ -379,7 +429,8 @@ def checkout(body: CheckoutRequest, request: Request, response: Response, idempo
     if visitor_state and visitor_state.customer_id is None:
         visitor_state.customer_id = user.id
     address = body.shipping_address
-    order = Order(public_id="CR-" + uuid4().hex[:12].upper(), customer_name=address.name, customer_email=user.email, customer_id=user.id, idempotency_key=idempotency_key, product_id=products[0].id, quantity=rows[0][0].quantity, amount=subtotal, currency="INR", payment_method=body.payment_method, referral_id=None, payment_status="pending" if body.payment_method == "demo" else "unpaid", status="pending" if body.payment_method == "demo" else "confirmed", shipping_name=address.name, shipping_phone=address.phone, shipping_line1=address.line1, shipping_line2=address.line2, shipping_city=address.city, shipping_state=address.state, shipping_postal_code=address.postal_code, shipping_country=address.country)
+    order_created_at = datetime.now(timezone.utc)
+    order = Order(public_id="CR-" + uuid4().hex[:12].upper(), customer_name=address.name, customer_email=user.email, customer_id=user.id, idempotency_key=idempotency_key, product_id=products[0].id, quantity=rows[0][0].quantity, amount=subtotal, currency="INR", payment_method=body.payment_method, referral_id=None, payment_status="pending" if body.payment_method == "demo" else "unpaid", status="pending" if body.payment_method == "demo" else "confirmed", shipping_name=address.name, shipping_phone=address.phone, shipping_line1=address.line1, shipping_line2=address.line2, shipping_city=address.city, shipping_state=address.state, shipping_postal_code=address.postal_code, shipping_country=address.country, created_at=order_created_at)
     db.add(order)
     db.flush()
     attributed_amount = Decimal("0.00")
@@ -404,14 +455,23 @@ def checkout(body: CheckoutRequest, request: Request, response: Response, idempo
                 item_referral = candidate
                 break
         item_referral_id = item_referral.id if item_referral else None
+        reward_snapshot = None
         if item_referral:
             selected_line_refs.append(item_referral)
+            campaign = db.get(Campaign, item_referral.campaign_id)
+            try:
+                if campaign is None:
+                    raise ValueError("Referral campaign is unavailable")
+                reward_snapshot = capture_reward_snapshot(db, item_referral, campaign, product, order_created_at)
+            except ValueError:
+                db.rollback()
+                raise HTTPException(status_code=409, detail="Referral reward terms are unavailable; the order was not placed") from None
             if self_referral(db,item_referral,user):
                 self_referral_seen = True
             else:
                 attributed_amount += line_total
                 eligible_product_count += 1
-        db.add(OrderItem(order_id=order.id, product_id=product.id, product_name=product.name, brand_name=brand, image_url=product.image_url, unit_price=unit, quantity=item.quantity, line_total=line_total, referral_id=item_referral_id))
+        db.add(OrderItem(order_id=order.id, product_id=product.id, product_name=product.name, brand_name=brand, image_url=product.image_url, unit_price=unit, quantity=item.quantity, line_total=line_total, referral_id=item_referral_id, reward_snapshot=reward_snapshot))
         db.delete(item)
 
     # Keep the order-level referral as a compatibility summary while rewards use
@@ -444,6 +504,27 @@ def checkout(body: CheckoutRequest, request: Request, response: Response, idempo
             generate_order_rewards(db,order,stage="demo")
     else:
         db.add(PaymentAttempt(order_id=order.id, attempt_number=1, idempotency_key=idempotency_key, payment_method="cod", status="unpaid", amount=subtotal, currency="INR", notes="Payment will be collected on delivery."))
+
+    db.flush()
+    brand_ids, creator_ids = _order_participants(db, order)
+    for brand_id in brand_ids:
+        create_notification(db, recipient_id=brand_id, event_key=f"order-created-brand:{order.id}:{brand_id}",
+            category="order", title="New customer order", body=f"A customer placed order {order.public_id} for products from your catalog.",
+            action_path=f"/orders/{order.public_id}")
+    for creator_id in creator_ids:
+        if creator_id == user.id:
+            continue
+        if order.status == "cancelled":
+            title="Attributed order cancelled"
+            body_text=f"An order attributed to your referral was cancelled before completion. The conversion is not eligible."
+        elif conversion and conversion.status == "confirmed":
+            title="Referral conversion confirmed"
+            body_text=f"An order attributed to your referral was recorded for {order.public_id}. Reward eligibility follows the payment method and hold rules."
+        else:
+            title="Referral order recorded"
+            body_text=f"A customer placed order {order.public_id} through your referral. Conversion remains pending until COD collection is confirmed."
+        create_notification(db, recipient_id=creator_id, event_key=f"conversion-created:{order.id}:{creator_id}",
+            category="order", title=title, body=body_text, action_path="/earnings")
 
     if body.payment_method == "cod":
         title = "Order placed"
@@ -556,6 +637,15 @@ def admin_collect_cod_payment(order_id: str, request: Request, response: Respons
     conversion = _conversion_for_order(db, order)
     transition_conversion(db, conversion, "confirmed", event_key=f"cod-collected:{order.id}", event_type="cod_collection_confirmed", actor_id=user.id)
     collect_cod_rewards(db,order,user.id)
+    brand_ids, creator_ids = _order_participants(db, order)
+    for brand_id in brand_ids:
+        create_notification(db, recipient_id=brand_id, event_key=f"cod-collected-brand:{order.id}:{brand_id}",
+            category="order", title="COD collection recorded", body=f"Cash collection for order {order.public_id} was confirmed after delivery.",
+            action_path=f"/orders/{order.public_id}")
+    for creator_id in creator_ids:
+        create_notification(db, recipient_id=creator_id, event_key=f"cod-conversion-confirmed:{order.id}:{creator_id}",
+            category="order", title="Referral conversion confirmed", body=f"COD collection for attributed order {order.public_id} was confirmed. Any reward remains subject to review and hold rules.",
+            action_path="/earnings")
     db.add(AuditLog(actor_id=user.id, action="order.cod_payment_collected", entity_type="order", entity_id=order.public_id))
     if order.customer_id:
         notice = f"Cash collection for order {order.public_id} was recorded by an administrator after delivery. No digital transaction or payout occurred."
@@ -614,6 +704,15 @@ def _cancel_order_record(db: Session, order: Order, actor: User) -> dict:
         create_notification(db, recipient_id=order.customer_id, event_key=f"order-cancelled:{order.id}", category="order",
             title="Order cancelled", body=notice, action_path=f"/orders/{order.public_id}",
             email_subject="Order cancelled", email_body=notice)
+    brand_ids, creator_ids = _order_participants(db, order)
+    for brand_id in brand_ids:
+        create_notification(db, recipient_id=brand_id, event_key=f"order-cancelled-brand:{order.id}:{brand_id}",
+            category="order", title="Customer order cancelled", body=f"Order {order.public_id} was cancelled before payment settlement; reserved stock was restored.",
+            action_path=f"/orders/{order.public_id}")
+    for creator_id in creator_ids:
+        create_notification(db, recipient_id=creator_id, event_key=f"conversion-cancelled:{order.id}:{creator_id}",
+            category="order", title="Referral conversion cancelled", body=f"The attributed order {order.public_id} was cancelled. Any pending conversion is no longer eligible.",
+            action_path="/earnings")
     db.commit()
     return _order_payload(db, order)
 
@@ -662,6 +761,11 @@ def update_order_status(order_id: str, body: OrderStatusUpdate, request: Request
         create_notification(db, recipient_id=order.customer_id, event_key=f"order-status:{order.id}:{body.status}", category="order",
             title="Order status updated", body=notice, action_path=f"/orders/{order.public_id}",
             email_subject="Order status updated", email_body=notice)
+    brand_ids, _creator_ids = _order_participants(db, order)
+    for brand_id in brand_ids:
+        create_notification(db, recipient_id=brand_id, event_key=f"order-status-brand:{order.id}:{body.status}:{brand_id}",
+            category="order", title="Order status updated", body=f"Order {order.public_id} is now {body.status}.",
+            action_path=f"/orders/{order.public_id}")
     db.commit()
     db.refresh(order)
     return _order_payload(db, order)

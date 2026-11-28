@@ -81,9 +81,13 @@ def brand_campaign_intelligence(campaign_id:int,request:Request,response:Respons
     if not campaign:raise HTTPException(404,"Campaign not found")
     if product_id is not None:
         configured=set(db.scalars(select(CampaignProduct.product_id).where(CampaignProduct.campaign_id==campaign.id)).all())
-        if not configured and campaign.product_id:configured={campaign.product_id}
-        if not configured and campaign.product_id is None:configured=set(db.scalars(select(Product.id).where(Product.brand_id==user.id)).all())
-        if product_id not in configured:raise HTTPException(422,"Product is not associated with this campaign")
+        if campaign.product_id:configured.add(campaign.product_id)
+        if not configured and campaign.product_id is None:
+            configured=set(db.scalars(select(Product.id).where(Product.brand_id==user.id)).all())
+        historically_attributed=db.scalar(select(OrderItem.id).join(Referral,Referral.id==OrderItem.referral_id).where(
+            OrderItem.product_id==product_id,Referral.campaign_id==campaign.id).limit(1))
+        if product_id not in configured and not historically_attributed:
+            raise HTTPException(422,"Product is not associated with this campaign")
     window=_window(period,start_date,end_date,campaign)
     return campaign_overview(db,campaign,window,product_id)
 

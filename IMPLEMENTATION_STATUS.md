@@ -1,6 +1,14 @@
 # CROWND implementation status
 
-Updated: 2026-11-25, after Phase 11 infrastructure feasibility and isolated local-runtime checks. Phase 10 hardening is committed as `1cda7d3`; Phase 11 remains in progress and is infrastructure-blocked. No production readiness is implied. This checklist is conservative: checked items are implemented and the indicated tests passed; not checked means incomplete or unverified. Detailed task/dependency plan: [`docs/DEVELOPMENT_ROADMAP.md`](docs/DEVELOPMENT_ROADMAP.md).
+Updated: 2026-11-25, during Phase 13 cross-module integration work. Phase 10 hardening is committed as `1cda7d3`; Phase 11 remains in progress and is infrastructure-blocked. Phase 13 is also in progress and not complete. No production readiness is implied. This checklist is conservative: checked items are implemented and the indicated tests passed; not checked means incomplete or unverified. Detailed task/dependency plan: [`docs/DEVELOPMENT_ROADMAP.md`](docs/DEVELOPMENT_ROADMAP.md).
+
+## Phase 13 status (2026-11-25)
+
+- Cross-module implementation and audit are being tracked in [`docs/PHASE_13_INTEGRATION_AUDIT.md`](docs/PHASE_13_INTEGRATION_AUDIT.md) and [`docs/PHASE_13_IMPLEMENTATION_LOG.md`](docs/PHASE_13_IMPLEMENTATION_LOG.md).
+- Implemented locally: checkout-time reward-term snapshots for COD settlement; append-only order-item history; dispute reward holds/release; creator-scoped mixed-cart conversion analytics; active-account/campaign acceptance and publication checks; cart-first lock ordering, idempotency recheck and concurrent first-cart recovery; participant notifications.
+- Additive migration `0010_integration_snapshots` follows `0009_notifications`. It has been exercised through disposable SQLite historical/fresh migration tests only. No connected Supabase or production database was used.
+- Backend suite: **81 passed**, 1 upstream Starlette/httpx deprecation warning. This is local SQLite evidence and does not verify PostgreSQL row locks, race behavior, multi-worker notifications, SMTP, or production operation.
+- **Phase 13 remains in progress / not complete.** No PostgreSQL endpoint was used or available for this work; no frontend suite, deployment, browser E2E, Docker/Compose, SMTP acceptance, or production smoke check was run. `compileall`, `git diff --check`, Alembic-head check and tracked-diff credential-pattern scan passed locally. Next: verify the final docs-inclusive worktree/diff and perform isolated PostgreSQL integration/concurrency/migration validation when a safe endpoint is available. No commit or push recorded yet.
 
 ## Phase 12 status (2026-11-25)
 

@@ -13,6 +13,7 @@ from app.security import require_role
 from app.api.v1.auth import limiter
 from app.services.auth import revoke_sessions
 from app.services.notifications import create_notification
+from app.services.rewards_engine import hold_reward_for_dispute, release_reward_dispute_hold
 
 router = APIRouter()
 
@@ -79,6 +80,40 @@ class DisputeAction(BaseModel):
 def _mask(email: str) -> str:
     local, _, domain = email.partition("@")
     return (local[:1] + "***@" + domain) if domain else "hidden"
+
+
+def _dispute_rewards(db: Session, case: AdminDispute) -> list[Reward]:
+    if case.reward_id:
+        rows = db.scalars(select(Reward).where(Reward.id == case.reward_id).with_for_update()).all()
+    elif case.conversion_id:
+        rows = db.scalars(select(Reward).where(Reward.conversion_id == case.conversion_id).order_by(Reward.id).with_for_update()).all()
+    elif case.order_id:
+        rows = db.scalars(select(Reward).where(Reward.order_id == case.order_id).order_by(Reward.id).with_for_update()).all()
+    else:
+        rows = []
+    return list(rows)
+
+
+def _hold_dispute_rewards(db: Session, case: AdminDispute, actor_id: int) -> None:
+    for reward in _dispute_rewards(db, case):
+        hold_reward_for_dispute(db, reward, case.id, actor_id)
+
+
+def _release_dispute_rewards(db: Session, case: AdminDispute, actor_id: int) -> list[int]:
+    released = []
+    for reward in _dispute_rewards(db, case):
+        if release_reward_dispute_hold(db, reward, case.id, actor_id):
+            released.append(reward.id)
+    return released
+
+
+def _notify_dispute_holds(db: Session, case: AdminDispute) -> None:
+    for reward in _dispute_rewards(db, case):
+        if reward.dispute_hold:
+            create_notification(db, recipient_id=reward.creator_id, event_key=f"dispute-hold:{case.id}:{reward.id}",
+                category="reward", title="Reward held for dispute review",
+                body=f"Reward {reward.id} is on hold while dispute case {case.id} is investigated. Ledger history was preserved.",
+                action_path="/earnings")
 
 
 @router.get("/admin/operations")
@@ -158,11 +193,14 @@ def change_user_lifecycle(user_id: int, body: LifecycleAction, request: Request,
     target.is_active = body.active
     if not body.active:
         revoke_sessions(db, target.id)
-    audit(db, user, "user.reactivated" if body.active else "user.suspended", "user", target.id, body.reason,
-          {"active": body.active, "sessions_revoked": not body.active})
+    lifecycle_audit = AdminAuditEvent(actor_id=user.id, action="user.reactivated" if body.active else "user.suspended",
+        entity_type="user", entity_id=str(target.id), reason=body.reason.strip()[:500],
+        metadata_json={"active": body.active, "sessions_revoked": not body.active}, created_at=now())
+    db.add(lifecycle_audit)
+    db.flush()
     notice = ("A CROWND administrator restored access to your account." if body.active else
               "A CROWND administrator suspended access to your account. Contact support if you believe this is a mistake.")
-    create_notification(db,recipient_id=target.id,event_key=f"user-lifecycle:{target.id}:{uuid4().hex}",category="security",
+    create_notification(db,recipient_id=target.id,event_key=f"user-lifecycle:{target.id}:{lifecycle_audit.id}",category="security",
         title="Account access updated",body=notice,action_path="/settings/notifications",
         email_subject="Your CROWND account access was updated",email_body=notice,essential_email=True)
     db.commit()
@@ -287,10 +325,14 @@ def open_user_dispute(body: UserDisputeCreate, request: Request, response: Respo
         AdminDispute.status.in_(["open", "under_review"])).with_for_update())
     if existing:
         raise HTTPException(409, f"An open dispute already exists for this order (case {existing.id})")
-    case = AdminDispute(order_id=order.id, status="open", summary=body.summary, opened_by=user.id, created_at=now())
+    conversion = db.scalar(select(Conversion).where(Conversion.order_id == order.id))
+    case = AdminDispute(order_id=order.id, conversion_id=conversion.id if conversion else None,
+        status="open", summary=body.summary, opened_by=user.id, created_at=now())
     db.add(case); db.flush()
+    _hold_dispute_rewards(db, case, user.id)
+    _notify_dispute_holds(db, case)
     db.add(AdminDisputeEvent(dispute_id=case.id, actor_id=user.id, event_type="opened", from_status=None, to_status="open", reason=body.reason, created_at=now()))
-    audit(db, user, "dispute.opened_by_user", "dispute", case.id, body.reason, {"order_id": order.id, "reporter_role": user.role})
+    audit(db, user, "dispute.opened_by_user", "dispute", case.id, body.reason, {"order_id": order.id, "conversion_id": case.conversion_id, "reporter_role": user.role})
     for administrator in db.scalars(select(User).where(User.role == "admin", User.is_active.is_(True))).all():
         create_notification(db, recipient_id=administrator.id, event_key=f"dispute-user-opened:{case.id}:{administrator.id}", category="order",
             title="A customer dispute was opened", body="A platform participant submitted an order dispute for administrator review.",
@@ -318,16 +360,27 @@ def list_disputes(request: Request, response: Response, status: str = Query("ope
 @limiter.limit("10/minute")
 def create_dispute(body: DisputeCreate, request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
     if not any((body.order_id, body.conversion_id, body.reward_id)): raise HTTPException(422, "Link the case to an order, conversion, or reward")
-    if body.order_id and not db.get(Order, body.order_id): raise HTTPException(404, "Order not found")
-    if body.conversion_id and not db.get(Conversion, body.conversion_id): raise HTTPException(404, "Conversion not found")
-    if body.reward_id and not db.get(Reward, body.reward_id): raise HTTPException(404, "Reward not found")
+    order = db.get(Order, body.order_id) if body.order_id else None
+    conversion = db.get(Conversion, body.conversion_id) if body.conversion_id else None
+    reward = db.get(Reward, body.reward_id) if body.reward_id else None
+    if body.order_id and not order: raise HTTPException(404, "Order not found")
+    if body.conversion_id and not conversion: raise HTTPException(404, "Conversion not found")
+    if body.reward_id and not reward: raise HTTPException(404, "Reward not found")
+    if order and conversion and conversion.order_id != order.id:
+        raise HTTPException(422, "Order and conversion must refer to the same order")
+    if order and reward and reward.order_id != order.id:
+        raise HTTPException(422, "Order and reward must refer to the same order")
+    if conversion and reward and reward.conversion_id != conversion.id:
+        raise HTTPException(422, "Conversion and reward must refer to the same conversion")
     case = AdminDispute(order_id=body.order_id, conversion_id=body.conversion_id, reward_id=body.reward_id,
         status="open", summary=body.summary, opened_by=user.id, created_at=now())
     db.add(case); db.flush()
+    _hold_dispute_rewards(db, case, user.id)
     db.add(AdminDisputeEvent(dispute_id=case.id, actor_id=user.id, event_type="opened", from_status=None,
         to_status="open", reason=body.reason, created_at=now()))
     audit(db, user, "dispute.opened", "dispute", case.id, body.reason, {"order_id": body.order_id,
         "conversion_id": body.conversion_id, "reward_id": body.reward_id})
+    _notify_dispute_holds(db, case)
     db.commit()
     return {"id": case.id, "status": case.status, "financial_history_mutated": False}
 
@@ -342,16 +395,28 @@ def update_dispute(dispute_id: int, body: DisputeAction, request: Request, respo
     if body.status not in allowed[case.status]: raise HTTPException(409, "Invalid dispute transition")
     previous = case.status; case.status = body.status
     if body.status == "resolved": case.resolved_by = user.id; case.resolved_at = now()
+    # Release checks query other active disputes, so make this transition visible
+    # even for sessions configured with autoflush disabled.
+    db.flush()
     db.add(AdminDisputeEvent(dispute_id=case.id, actor_id=user.id, event_type="status_changed", from_status=previous,
         to_status=body.status, reason=body.reason, created_at=now()))
     audit(db, user, f"dispute.{body.status}", "dispute", case.id, body.reason, {"from_status": previous, "to_status": body.status})
-    if case.opened_by and case.opened_by != user.id:
-        order = db.get(Order, case.order_id) if case.order_id else None
-        create_notification(db, recipient_id=case.opened_by, event_key=f"dispute-status:{case.id}:{body.status}:{uuid4().hex}", category="order",
-            title="Order issue status updated", body=f"Your dispute case is now {body.status.replace('_', ' ')}. The decision did not alter financial records.",
+    released_rewards = _release_dispute_rewards(db, case, user.id) if body.status == "resolved" else []
+    order = db.get(Order, case.order_id) if case.order_id else None
+    recipients = {case.opened_by} if case.opened_by and case.opened_by != user.id else set()
+    for reward in _dispute_rewards(db, case):
+        recipients.add(reward.creator_id)
+        if reward.id in released_rewards:
+            create_notification(db, recipient_id=reward.creator_id, event_key=f"dispute-release:{case.id}:{reward.id}",
+                category="reward", title="Reward dispute hold updated",
+                body=f"Dispute case {case.id} was resolved. The reward review state was restored when no other open dispute or risk hold remained. Ledger history was preserved.",
+                action_path="/earnings")
+    for recipient_id in recipients:
+        create_notification(db, recipient_id=recipient_id, event_key=f"dispute-status:{case.id}:{body.status}:{recipient_id}", category="order",
+            title="Order issue status updated", body=f"Your dispute case is now {body.status.replace('_', ' ')}. The decision did not delete or overwrite financial history.",
             action_path=f"/orders/{order.public_id}" if order else None)
     db.commit()
-    return {"id": case.id, "status": case.status, "financial_history_mutated": False}
+    return {"id": case.id, "status": case.status, "financial_history_mutated": False, "released_rewards": released_rewards}
 
 
 @router.get("/admin/audit-events")

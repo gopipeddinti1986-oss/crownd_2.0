@@ -63,7 +63,7 @@ def brand_campaign_detail(campaign_id:int,db:Session=Depends(get_db),user:User=D
 
 @router.put("/campaigns/{campaign_id}")
 def update_campaign(campaign_id:int,body:CampaignUpdate,db:Session=Depends(get_db),user:User=Depends(require_role("brand"))):
-    campaign=db.scalar(select(Campaign).where(Campaign.id==campaign_id,Campaign.brand_id==user.id))
+    campaign=db.scalar(select(Campaign).where(Campaign.id==campaign_id,Campaign.brand_id==user.id).with_for_update())
     if not campaign:raise HTTPException(404,"Campaign not found")
     if campaign.status not in {"draft","paused"}:raise HTTPException(409,"Pause the campaign before editing its configuration")
     values=body.model_dump(exclude_unset=True)

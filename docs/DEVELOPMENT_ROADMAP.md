@@ -204,6 +204,20 @@ Audit scope, per-module COMPLETE/PARTIAL/MISSING/BROKEN/PLACEHOLDER/DISCONNECTED
 
 Current Phase 12 estimate: **80%** (scope estimate, not a test-derived KPI). Local fixes and automated regression checks are substantially complete; external runtime validation and the listed product gaps remain. Residual priorities: **P0** Phase 11 infrastructure checks; **P1** PostgreSQL concurrency and broader security/accessibility review; **P2** creator invitations, dispute evidence, messaging, saved addresses and product catalogue enhancements; **P3** support destination and specified dashboard date ranges. Payment remains simulated demo plus COD only.
 
+## Phase 13 — Cross-module integration and transition reliability (in progress; not complete)
+
+Audit findings, workflow disposition and unresolved risks: [`PHASE_13_INTEGRATION_AUDIT.md`](PHASE_13_INTEGRATION_AUDIT.md). Implementation and executed evidence: [`PHASE_13_IMPLEMENTATION_LOG.md`](PHASE_13_IMPLEMENTATION_LOG.md). Work remains incremental; preserve existing behavior and do not redesign the UI.
+
+| Workstream | Local implementation/evidence | Outstanding |
+|---|---|---|
+| Referral/order/reward/analytics journey | Checkout reward terms are snapshotted per attributed order item; mixed-cart creator conversion views report only that creator's items. COD integration asserts persisted frozen-rate reward and creator-scoped attribution lines. | Isolated PostgreSQL query, concurrency and reporting reconciliation.
+| Cancellation, inventory and idempotency | Cart-first locking, stable product lock ordering, conditional stock reservation, repeat idempotency lookup, savepoint recovery for first-cart creation. Existing cancel/restock and replay coverage retained. | PostgreSQL simultaneous checkout/cart mutation/cancel stress tests.
+| COD collection, suspension and campaign lifecycle | Rewards use checkout terms at collection; inactive creators are barred from approval/simulated payout; campaign acceptance/publication checks active participants/products; relevant rows locked. | Concurrent suspension/acceptance/payout and publication/product-state races on PostgreSQL.
+| Disputes, ledger and events | Disputes hold linked rewards and release only after final active case; status is flushed before querying; ledger IDs/amounts/directions asserted unchanged; order-item history append-only. | PostgreSQL concurrent dispute/collection tests, live SMTP and multi-worker dedupe.
+| Schema / regression | Additive Alembic `0010_integration_snapshots`; migration paths assert added columns and SQLite append-only triggers. Backend `pytest -q`: **81 passed**, one upstream Starlette/httpx deprecation warning; compileall, `git diff --check`, Alembic-head and tracked-diff credential-pattern checks passed. | PostgreSQL migration/trigger behavior; frontend checks if contracts require them.
+
+**Phase 13 completion is not claimed.** Supabase/production data was not used. No PostgreSQL, Docker/Compose, browser E2E, SMTP acceptance, backup/restore, deployment or production smoke test was performed. The existing Phase 11 infrastructure blocker remains. The current result is local backend implementation and SQLite regression evidence, not production readiness.
+
 ## Current phase
 
 - **Audit and roadmap:** complete; the original branch baseline and prior Phase 1/2 evidence are recorded above and in `IMPLEMENTATION_STATUS.md`.

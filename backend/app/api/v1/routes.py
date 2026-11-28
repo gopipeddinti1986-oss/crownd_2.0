@@ -146,11 +146,11 @@ def create_campaign(body:CampaignCreate,db:Session=Depends(get_db),user:User=Dep
 
 @router.put("/campaigns/{campaign_id}/products")
 def update_campaign_products(campaign_id:int,body:CampaignProductsUpdate,db:Session=Depends(get_db),user:User=Depends(current_user)):
-    campaign=db.get(Campaign,campaign_id)
+    campaign=db.scalar(select(Campaign).where(Campaign.id==campaign_id).with_for_update())
     if not campaign: raise HTTPException(404,"Campaign not found")
     if user.role!="admin" and (user.role!="brand" or campaign.brand_id!=user.id): raise HTTPException(404,"Campaign not found")
     if campaign.status=="published" and user.role!="admin": raise HTTPException(409,"Pause the campaign before changing its eligible products")
-    products=db.scalars(select(Product).where(Product.id.in_(body.product_ids),Product.brand_id==campaign.brand_id,Product.status=="active")).all()
+    products=db.scalars(select(Product).where(Product.id.in_(body.product_ids),Product.brand_id==campaign.brand_id,Product.status=="active").order_by(Product.id).with_for_update()).all()
     if len(products)!=len(body.product_ids): raise HTTPException(422,"Campaign products must be active products owned by the campaign brand")
     db.execute(delete(CampaignProduct).where(CampaignProduct.campaign_id==campaign.id))
     for product in products: db.add(CampaignProduct(campaign_id=campaign.id,product_id=product.id))
@@ -163,13 +163,22 @@ def campaign_detail(campaign_id:int,db:Session=Depends(get_db)):
     return {"id":c.id,"title":c.title,"description":c.description,"brand_id":c.brand_id,"product_id":c.product_id,"category":c.category,"platforms":c.platforms,"reward_model":c.reward_model,"reward_rate":str(c.reward_rate),"budget":str(c.budget),"status":c.status,"starts_at":c.starts_at.isoformat() if c.starts_at else None,"ends_at":c.ends_at.isoformat() if c.ends_at else None,"objectives":c.objectives or [],"target_audience":c.target_audience or "","creator_requirements":c.creator_requirements or "","visibility":c.visibility or "public","performance_goals":c.performance_goals or {}}
 @router.patch("/campaigns/{campaign_id}/status")
 def change_campaign(campaign_id:int,body:CampaignStatusUpdate,db:Session=Depends(get_db),user:User=Depends(current_user)):
-    c=db.get(Campaign,campaign_id)
+    c=db.scalar(select(Campaign).where(Campaign.id==campaign_id).with_for_update())
     if not c: raise HTTPException(404,"Campaign not found")
     if user.role!="admin" and (user.role!="brand" or c.brand_id!=user.id): raise HTTPException(403,"Not your campaign")
     if user.role=="admin": raise HTTPException(409,"Administrators must use the reasoned campaign moderation workflow")
     target=body.status
     allowed={"draft":{"published","cancelled"},"published":{"paused","completed","cancelled"},"paused":{"published","completed","cancelled"}}
     if target not in allowed.get(c.status,set()): raise HTTPException(409,"Invalid campaign status transition")
+    if target == "published":
+        brand = db.scalar(select(User).where(User.id==c.brand_id).with_for_update())
+        if not brand or brand.role!="brand" or not brand.is_active:
+            raise HTTPException(409,"An inactive brand cannot publish a campaign")
+        selected=set(db.scalars(select(CampaignProduct.product_id).where(CampaignProduct.campaign_id==c.id)).all())
+        if c.product_id: selected.add(c.product_id)
+        if selected:
+            active=set(db.scalars(select(Product.id).where(Product.id.in_(selected),Product.brand_id==c.brand_id,Product.status=="active").order_by(Product.id).with_for_update()).all())
+            if active!=selected: raise HTTPException(409,"All explicitly selected campaign products must be active and owned by the brand")
     c.status=target; audit(db,user,"campaign.status_changed","campaign",c.id); db.commit(); return {"id":c.id,"status":c.status}
 
 @router.post("/campaigns/{campaign_id}/applications",status_code=201)
@@ -201,11 +210,18 @@ def applications(db:Session=Depends(get_db),user:User=Depends(current_user)):
 def review_application(application_id:int,body:ApplicationReview,db:Session=Depends(get_db),user:User=Depends(current_user)):
     a=db.scalar(select(Application).where(Application.id==application_id).with_for_update())
     if not a: raise HTTPException(404,"Application not found")
-    c=db.get(Campaign,a.campaign_id)
-    if user.role!="admin" and (user.role!="brand" or c.brand_id!=user.id): raise HTTPException(403,"Forbidden")
+    c=db.scalar(select(Campaign).where(Campaign.id==a.campaign_id).with_for_update())
+    if user.role!="admin" and (user.role!="brand" or not c or c.brand_id!=user.id): raise HTTPException(403,"Forbidden")
     status=body.status
     if status==a.status:
         return {"id":a.id,"status":a.status}
+    if status == "accepted":
+        brand = db.scalar(select(User).where(User.id==c.brand_id).with_for_update()) if c else None
+        creator = db.scalar(select(User).where(User.id==a.creator_id).with_for_update())
+        if not c or not campaign_is_active(c) or not brand or not brand.is_active:
+            raise HTTPException(409, "Only an active campaign from an active brand can accept creators")
+        if not creator or not creator.is_active:
+            raise HTTPException(409, "Suspended creators cannot be accepted into campaigns")
     transitions={"pending":{"shortlisted","accepted","rejected"},"shortlisted":{"accepted","rejected"}}
     if status not in transitions.get(a.status,set()):
         raise HTTPException(409,f"Application cannot transition from {a.status} to {status}")
@@ -309,7 +325,8 @@ def get_creator_referral_link(referral_id:int,db:Session=Depends(get_db),user:Us
     pair=db.execute(select(Referral,Campaign).join(Campaign,Campaign.id==Referral.campaign_id).where(Referral.id==referral_id,Referral.creator_id==user.id)).first()
     if not pair: raise HTTPException(404,"Referral link not found")
     ref,campaign=pair
-    counts={status:(db.scalar(select(func.count(Conversion.id)).where(Conversion.referral_id==ref.id,Conversion.status==status)) or 0) for status in ("pending","confirmed","cancelled","reversed","ineligible")}
+    item_conversion=select(OrderItem.id).where(OrderItem.order_id==Conversion.order_id,OrderItem.referral_id==ref.id).exists()
+    counts={status:(db.scalar(select(func.count(Conversion.id)).where(Conversion.status==status,or_(Conversion.referral_id==ref.id,item_conversion))) or 0) for status in ("pending","confirmed","cancelled","reversed","ineligible")}
     clicks=db.scalar(select(func.count(Click.id)).where(Click.referral_id==ref.id,Click.status=="valid")) or 0
     unique=db.scalar(select(func.count(func.distinct(Click.session_hash))).where(Click.referral_id==ref.id,Click.session_hash!="",Click.status=="valid")) or 0
     result=_referral_link_payload(ref,campaign,clicks=clicks,unique_visitors=unique,conversion_counts=counts)
@@ -358,6 +375,24 @@ def _conversion_payload(conversion:Conversion,order:Order):
     return {"id":conversion.id,"order_id":order.public_id,"referral_id":conversion.referral_id,"campaign_id":conversion.campaign_id,"creator_id":conversion.creator_id,"status":conversion.status,"attributed_amount":str(conversion.attributed_amount),"currency":conversion.currency,"is_demo":conversion.is_demo,"payment_method":order.payment_method,"payment_status":order.payment_status,"reason":conversion.reason,"created_at":conversion.created_at.isoformat(),"confirmed_at":conversion.confirmed_at.isoformat() if conversion.confirmed_at else None}
 
 
+def _creator_conversion_payload(db:Session,conversion:Conversion,order:Order,creator_id:int):
+    rows=db.execute(select(OrderItem,Referral).join(Referral,Referral.id==OrderItem.referral_id).where(
+        OrderItem.order_id==order.id,Referral.creator_id==creator_id).order_by(OrderItem.id)).all()
+    amount=sum((Decimal(line.line_total) for line,_referral in rows),Decimal("0.00"))
+    if not rows:
+        # Retain legacy conversion attribution when no line-level referral rows
+        # exist (pre-item-attribution orders).
+        return _conversion_payload(conversion,order)
+    referrals={ref.id:ref for _line,ref in rows}
+    result=_conversion_payload(conversion,order)
+    result.update({"creator_id":creator_id,"referral_id":next(iter(referrals)) if len(referrals)==1 else None,
+        "campaign_id":next(iter({ref.campaign_id for ref in referrals.values()})) if len({ref.campaign_id for ref in referrals.values()})==1 else None,
+        "attributed_amount":str(amount.quantize(Decimal("0.01"))),
+        "attribution_lines":[{"referral_id":ref.id,"campaign_id":ref.campaign_id,"product_id":line.reward_snapshot.get("product_id") if line.reward_snapshot else line.product_id,
+            "product_name":line.product_name,"quantity":line.quantity,"line_total":str(line.line_total)} for line,ref in rows]})
+    return result
+
+
 def _referral_metrics(db:Session,referral_ids:list[int],conversions,cutoff:datetime,product_id:int|None=None):
     if not referral_ids:
         return {"clicks":0,"unique_visitors":0,"product_views":0,"cart_additions":0,"orders":0,"confirmed_conversions":0,"pending_conversions":0,"cancelled_conversions":0,"reversed_conversions":0,"demo_conversions":0,"cod_conversions":0,"conversion_rate":0.0}
@@ -380,35 +415,44 @@ def _referral_metrics(db:Session,referral_ids:list[int],conversions,cutoff:datet
 def creator_referral_analytics(days:int=Query(default=30,ge=1,le=365),campaign_id:int|None=Query(default=None,gt=0),product_id:int|None=Query(default=None,gt=0),referral_id:int|None=Query(default=None,gt=0),db:Session=Depends(get_db),user:User=Depends(require_role("creator"))):
     refs=db.scalars(select(Referral).where(Referral.creator_id==user.id)).all()
     if campaign_id is not None: refs=[ref for ref in refs if ref.campaign_id==campaign_id]
-    if product_id is not None: refs=[ref for ref in refs if (ref.product_id in (None,product_id) and product_id in eligible_product_ids(db,db.get(Campaign,ref.campaign_id)))]
+    if product_id is not None: refs=[ref for ref in refs if ref.product_id in (None,product_id)]
     if referral_id is not None:
         if not any(ref.id==referral_id for ref in refs): raise HTTPException(404,"Referral link not found")
         refs=[ref for ref in refs if ref.id==referral_id]
     referral_ids=[ref.id for ref in refs]
     cutoff=datetime.now(timezone.utc)-timedelta(days=days)
-    stmt=select(Conversion,Order).join(Order,Order.id==Conversion.order_id).where(Conversion.creator_id==user.id,Conversion.created_at>=cutoff)
-    if campaign_id is not None: stmt=stmt.where(Conversion.campaign_id==campaign_id)
-    if referral_id is not None: stmt=stmt.where(Conversion.referral_id==referral_id)
-    if product_id is not None:
-        matching_item=select(OrderItem.id).where(OrderItem.order_id==Order.id,OrderItem.product_id==product_id,OrderItem.referral_id==Conversion.referral_id).exists()
-        stmt=stmt.where(matching_item)
-    return {"window_days":days,"metrics":_referral_metrics(db,referral_ids,stmt,cutoff)}
+    matching_items=select(OrderItem.id).join(Referral,Referral.id==OrderItem.referral_id).where(
+        OrderItem.order_id==Order.id,Referral.creator_id==user.id)
+    if campaign_id is not None: matching_items=matching_items.where(Referral.campaign_id==campaign_id)
+    if referral_id is not None: matching_items=matching_items.where(OrderItem.referral_id==referral_id)
+    if product_id is not None: matching_items=matching_items.where(OrderItem.product_id==product_id)
+    stmt=select(Conversion,Order).join(Order,Order.id==Conversion.order_id).where(Conversion.created_at>=cutoff,
+        or_(Conversion.referral_id.in_(referral_ids) if referral_ids else False, matching_items.exists()))
+    return {"window_days":days,"metrics":_referral_metrics(db,referral_ids,stmt,cutoff,product_id)}
 
 
 @router.get("/creator/conversions")
 def creator_conversions(page:int=Query(default=1,ge=1),page_size:int=Query(default=25,ge=1,le=100),status:str|None=None,campaign_id:int|None=Query(default=None,gt=0),product_id:int|None=Query(default=None,gt=0),referral_id:int|None=Query(default=None,gt=0),db:Session=Depends(get_db),user:User=Depends(require_role("creator"))):
-    stmt=select(Conversion,Order).join(Order,Order.id==Conversion.order_id).where(Conversion.creator_id==user.id)
+    creator_items=select(OrderItem.id).join(Referral,Referral.id==OrderItem.referral_id).where(
+        OrderItem.order_id==Order.id,Referral.creator_id==user.id)
+    stmt=select(Conversion,Order).join(Order,Order.id==Conversion.order_id).where(
+        or_(Conversion.creator_id==user.id,creator_items.exists()))
     if status: stmt=stmt.where(Conversion.status==status)
-    if campaign_id: stmt=stmt.where(Conversion.campaign_id==campaign_id)
+    if campaign_id:
+        campaign_items=select(OrderItem.id).join(Referral,Referral.id==OrderItem.referral_id).where(
+            OrderItem.order_id==Order.id,Referral.creator_id==user.id,Referral.campaign_id==campaign_id)
+        stmt=stmt.where(or_(and_(Conversion.creator_id==user.id,Conversion.campaign_id==campaign_id),campaign_items.exists()))
     if referral_id:
         if not db.scalar(select(Referral.id).where(Referral.id==referral_id,Referral.creator_id==user.id)): raise HTTPException(404,"Referral link not found")
-        stmt=stmt.where(Conversion.referral_id==referral_id)
+        referral_items=select(OrderItem.id).where(OrderItem.order_id==Order.id,OrderItem.referral_id==referral_id)
+        stmt=stmt.where(or_(Conversion.referral_id==referral_id,referral_items.exists()))
     if product_id:
-        matching_item=select(OrderItem.id).where(OrderItem.order_id==Order.id,OrderItem.product_id==product_id,OrderItem.referral_id==Conversion.referral_id).exists()
-        stmt=stmt.where(matching_item)
+        matching_item=select(OrderItem.id).join(Referral,Referral.id==OrderItem.referral_id).where(
+            OrderItem.order_id==Order.id,OrderItem.product_id==product_id,Referral.creator_id==user.id)
+        stmt=stmt.where(matching_item.exists())
     total=db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     rows=db.execute(stmt.order_by(Conversion.created_at.desc(),Conversion.id.desc()).offset((page-1)*page_size).limit(page_size)).all()
-    return {"items":[_conversion_payload(conversion,order) for conversion,order in rows],"total":total,"page":page,"page_size":page_size,"pages":(total+page_size-1)//page_size}
+    return {"items":[_creator_conversion_payload(db,conversion,order,user.id) for conversion,order in rows],"total":total,"page":page,"page_size":page_size,"pages":(total+page_size-1)//page_size}
 
 
 @router.get("/brand/campaign-analytics/{campaign_id}")

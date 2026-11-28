@@ -13,14 +13,14 @@ def test_phase6_migration_fresh_upgrade_downgrade_reupgrade_is_additive(tmp_path
     connection=sqlite3.connect(database)
     columns={row[1] for row in connection.execute("PRAGMA table_info(campaigns)")}
     assert {"objectives","target_audience","creator_requirements","visibility","performance_goals"}<=columns
-    assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]=="0009_notifications"
+    assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]=="0010_integration_snapshots"
     connection.close()
     command.downgrade(config,"0006_rewards_ledger")
     command.upgrade(config,"head")
     connection=sqlite3.connect(database)
     columns={row[1] for row in connection.execute("PRAGMA table_info(campaigns)")}
     assert {"objectives","target_audience","creator_requirements","visibility","performance_goals"}<=columns
-    assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]=="0009_notifications"
+    assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]=="0010_integration_snapshots"
     connection.close()
 
 

@@ -4,9 +4,9 @@ from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from hashlib import sha256
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.orm import Session
-from app.models.entities import (Application, AuditLog, Campaign, Conversion, LedgerEntry, Order, OrderItem,
+from app.models.entities import (AdminDispute, Application, AuditLog, Campaign, Conversion, LedgerEntry, Order, OrderItem,
     Product, Referral, ReferralRiskFlag, Reward, RewardEvent, RewardRule, SimulatedPayout, User)
 from app.services.conversions import flag_risk
 from app.services.referrals import referral_eligibility
@@ -63,6 +63,28 @@ def select_reward_rule(db: Session, campaign: Campaign, product: Product, at: da
     return None,"campaign_default"
 
 
+def capture_reward_snapshot(db: Session, referral: Referral, campaign: Campaign, product: Product, at: datetime) -> dict:
+    """Freeze attribution and commission terms at checkout for later COD settlement."""
+    rule, source = select_reward_rule(db, campaign, product, at)
+    reward_type, rate, fixed, currency = _rule_parts(campaign, rule)
+    minimum = Decimal(rule.minimum_eligible_amount) if rule else ZERO
+    max_reward = Decimal(rule.max_reward) if rule and rule.max_reward is not None else None
+    creator_cap = Decimal(rule.max_creator_total) if rule and rule.max_creator_total is not None else None
+    campaign_cap = Decimal(rule.max_campaign_total) if rule and rule.max_campaign_total is not None else None
+    validate_rule_values(reward_type=reward_type, rate=rate, fixed_amount=fixed, currency=currency,
+        minimum_eligible_amount=minimum, max_reward=max_reward,
+        max_creator_total=creator_cap, max_campaign_total=campaign_cap)
+    return {"version": 1, "captured_at": at.isoformat(), "referral_id": referral.id,
+        "creator_id": referral.creator_id, "brand_id": campaign.brand_id, "campaign_id": campaign.id,
+        "product_id": product.id, "rule_id": rule.id if rule else None, "rule_source": source,
+        "reward_type": reward_type, "rate": str(rate) if rate is not None else None,
+        "fixed_amount": str(fixed) if fixed is not None else None, "currency": currency,
+        "minimum_eligible_amount": str(minimum), "max_reward": str(max_reward) if max_reward is not None else None,
+        "max_creator_total": str(creator_cap) if creator_cap is not None else None,
+        "max_campaign_total": str(campaign_cap) if campaign_cap is not None else None,
+        "campaign_budget": str(cash(campaign.budget)) if Decimal(campaign.budget or 0) > 0 else None}
+
+
 def _rule_parts(campaign: Campaign, rule: RewardRule | None):
     if rule:
         return rule.reward_type, (Decimal(rule.rate) if rule.rate is not None else None), (Decimal(rule.fixed_amount) if rule.fixed_amount is not None else None), rule.currency
@@ -94,7 +116,8 @@ def _reward_has_open_risk(db: Session, reward: Reward, conversion_id: int) -> bo
     referral_ids=list(db.scalars(select(OrderItem.referral_id).where(OrderItem.id.in_(item_ids),OrderItem.referral_id.is_not(None))).all()) if item_ids else []
     condition=ReferralRiskFlag.conversion_id==conversion_id
     if referral_ids: condition=condition|(ReferralRiskFlag.referral_id.in_(referral_ids))
-    return bool(db.scalar(select(ReferralRiskFlag.id).where(ReferralRiskFlag.status=="open",condition).limit(1)))
+    risk=bool(db.scalar(select(ReferralRiskFlag.id).where(ReferralRiskFlag.status=="open",condition).limit(1)))
+    return risk or _has_open_dispute(db,order_id=reward.order_id,conversion_id=conversion_id,reward_id=reward.id)
 
 
 def _event(db: Session, reward: Reward, key: str, event_type: str, old: str | None, new: str,
@@ -114,80 +137,156 @@ def _ledger(db: Session, *, key: str, user_id: int, reward_id: int, order: Order
     db.add(row);db.flush();return row
 
 
+def _has_open_dispute(db: Session, *, order_id: int, conversion_id: int, referral_id: int | None = None, reward_id: int | None = None) -> bool:
+    # A case may be linked at any level. Match each supplied identifier as an
+    # independent association, not as a conjunction (or as another conversion).
+    criteria = [AdminDispute.order_id == order_id, AdminDispute.conversion_id == conversion_id]
+    if reward_id is not None:
+        criteria.append(AdminDispute.reward_id == reward_id)
+    return bool(db.scalar(select(AdminDispute.id).where(AdminDispute.status != "resolved", or_(*criteria)).limit(1)))
+
+
+def hold_reward_for_dispute(db: Session, reward: Reward, dispute_id: int, actor_id: int | None = None) -> None:
+    if reward.is_demo or reward.status in {"rejected", "reversed", "simulated"}:
+        return
+    if not reward.dispute_hold:
+        reward.dispute_prior_status = reward.status
+    old = reward.status
+    reward.dispute_hold = True
+    reward.status = "under_review"
+    reward.updated_at = datetime.now(timezone.utc)
+    _event(db, reward, f"dispute-hold:{dispute_id}", "dispute_hold", old, "under_review", actor_id,
+        "Reward held while an associated dispute is open.", {"dispute_id": dispute_id, "prior_status": reward.dispute_prior_status})
+
+
+def release_reward_dispute_hold(db: Session, reward: Reward, dispute_id: int, actor_id: int) -> bool:
+    conversion_id = reward.conversion_id or 0
+    if _has_open_dispute(db, order_id=reward.order_id, conversion_id=conversion_id, reward_id=reward.id):
+        return False
+    if not reward.dispute_hold:
+        return False
+    old = reward.status
+    prior = reward.dispute_prior_status or "pending"
+    risk = _is_open_risk(db, reward.referral_id or 0, conversion_id)
+    creator = db.get(User, reward.creator_id)
+    next_status = "under_review" if risk or not creator or not creator.is_active else (prior if prior in {"pending", "approved"} else "pending")
+    reward.status = next_status
+    reward.dispute_hold = False
+    reward.dispute_prior_status = None
+    reward.updated_at = datetime.now(timezone.utc)
+    _event(db, reward, f"dispute-release:{dispute_id}", "dispute_hold_released", old, next_status, actor_id,
+        "Dispute resolved; reward review state restored without changing ledger entries.", {"dispute_id": dispute_id})
+    return True
+
+
 def _record_reward(db: Session, *, order: Order, conversion: Conversion, referral: Referral, campaign: Campaign,
-                   product: Product, lines: list[OrderItem], customer: User, demo: bool, stage: str,
-                   actor_id: int | None=None) -> Reward | None:
+                   product: Product | None, lines: list[OrderItem], customer: User, demo: bool, stage: str,
+                   pricing_snapshot: dict | None = None, actor_id: int | None=None) -> Reward | None:
     if not lines or self_referral(db,referral,customer):
         if lines and self_referral(db,referral,customer):
             flag_risk(db,"SELF_REFERRAL",referral_id=referral.id,conversion_id=conversion.id,customer_id=customer.id,
                       visitor_hash=conversion.visitor_hash,details="Buyer matches the referred creator account/email.")
         return None
     eligible_amount=cash(sum((cash(line.line_total) for line in lines),Decimal("0")))
-    reward_type_placeholder=None
-    rule,rule_source=select_reward_rule(db,campaign,product,order.created_at or datetime.now(timezone.utc))
-    ids=[line.id for line in lines]
-    token=f"{order.id}:{referral.creator_id}:{campaign.id}:{rule.id if rule else 'campaign-default'}:{','.join(map(str,ids))}"
+    if pricing_snapshot:
+        terms = pricing_snapshot
+        rule_id = terms.get("rule_id")
+        rule_source = terms.get("rule_source", "campaign_default")
+        reward_type = terms["reward_type"]
+        rate = Decimal(terms["rate"]) if terms.get("rate") is not None else None
+        fixed = Decimal(terms["fixed_amount"]) if terms.get("fixed_amount") is not None else None
+        currency = terms.get("currency", order.currency or "INR")
+        minimum = Decimal(terms.get("minimum_eligible_amount", "0"))
+        max_reward = Decimal(terms["max_reward"]) if terms.get("max_reward") is not None else None
+        creator_cap = Decimal(terms["max_creator_total"]) if terms.get("max_creator_total") is not None else None
+        campaign_cap = Decimal(terms["max_campaign_total"]) if terms.get("max_campaign_total") is not None else None
+        campaign_budget_limit = Decimal(terms["campaign_budget"]) if terms.get("campaign_budget") is not None else None
+        snapshot_product_ids={(line.reward_snapshot or {}).get("product_id", line.product_id) for line in lines}
+        product_id=next(iter(snapshot_product_ids)) if len(snapshot_product_ids)==1 else None
+        if product_id is not None:
+            product_id=int(product_id)
+        if (int(terms.get("creator_id", referral.creator_id)) != referral.creator_id
+                or int(terms.get("campaign_id", campaign.id)) != campaign.id
+                or int(terms.get("referral_id", referral.id)) != referral.id
+                or int(terms.get("brand_id", campaign.brand_id)) != campaign.brand_id):
+            flag_risk(db, "ATTRIBUTION_SNAPSHOT_MISMATCH", referral_id=referral.id, conversion_id=conversion.id,
+                customer_id=customer.id, visitor_hash=conversion.visitor_hash, details="Checkout reward snapshot does not match persisted order attribution.")
+            return None
+    else:
+        # Compatibility path for pre-Phase-13 order items without checkout snapshots.
+        if product is None:
+            return None
+        rule,rule_source=select_reward_rule(db,campaign,product,order.created_at or datetime.now(timezone.utc))
+        rule_id=rule.id if rule else None
+        reward_type,rate,fixed,currency=_rule_parts(campaign,rule)
+        minimum=Decimal(rule.minimum_eligible_amount) if rule else ZERO
+        max_reward=Decimal(rule.max_reward) if rule and rule.max_reward is not None else None
+        creator_cap=Decimal(rule.max_creator_total) if rule and rule.max_creator_total is not None else None
+        campaign_cap=Decimal(rule.max_campaign_total) if rule and rule.max_campaign_total is not None else None
+        campaign_budget_limit=cash(campaign.budget) if Decimal(campaign.budget or 0)>0 else None
+        product_id=product.id
+    token=f"{order.id}:{referral.creator_id}:{campaign.id}:{rule_id if rule_id else 'campaign-default'}:{','.join(map(str,[line.id for line in lines]))}"
     source="reward:"+sha256(token.encode()).hexdigest()
     existing=db.scalar(select(Reward).where(Reward.source_key==source))
     if existing:return existing
-    reward_type,rate,fixed,currency=_rule_parts(campaign,rule)
     try:
         validate_rule_values(reward_type=reward_type,rate=rate,fixed_amount=fixed,currency=currency,
-            minimum_eligible_amount=Decimal(rule.minimum_eligible_amount) if rule else ZERO,
-            max_reward=Decimal(rule.max_reward) if rule and rule.max_reward is not None else None,
-            max_creator_total=Decimal(rule.max_creator_total) if rule and rule.max_creator_total is not None else None,
-            max_campaign_total=Decimal(rule.max_campaign_total) if rule and rule.max_campaign_total is not None else None)
+            minimum_eligible_amount=minimum,max_reward=max_reward,max_creator_total=creator_cap,max_campaign_total=campaign_cap)
     except ValueError:
         return None
-    minimum=Decimal(rule.minimum_eligible_amount) if rule else ZERO
     if eligible_amount < minimum: return None
     amount,formula=_calculation(eligible_amount,reward_type,rate,fixed)
-    if rule and rule.max_reward is not None: amount=min(amount,cash(rule.max_reward))
+    if max_reward is not None: amount=min(amount,cash(max_reward))
     creator_used_before=ZERO
     rule_campaign_used_before=ZERO
     campaign_budget_used_before=ZERO
-    campaign_budget_limit=cash(campaign.budget) if Decimal(campaign.budget or 0)>0 else None
     if not demo:
-        # Serialize cap/budget reads for this campaign on PostgreSQL transactions;
-        # SQLite test locks are advisory only and do not prove production concurrency.
         db.scalar(select(Campaign.id).where(Campaign.id==campaign.id).with_for_update())
-        if rule and rule.max_creator_total is not None:
-            creator_used_before=cash(Decimal(db.scalar(select(func.coalesce(func.sum(Reward.amount),0)).where(Reward.reward_rule_id==rule.id,Reward.creator_id==referral.creator_id,Reward.is_demo.is_(False),Reward.status.notin_(["reversed","rejected"]))) or 0))
-            amount=min(amount,max(ZERO,cash(rule.max_creator_total)-creator_used_before))
-        if rule and rule.max_campaign_total is not None:
-            rule_campaign_used_before=cash(Decimal(db.scalar(select(func.coalesce(func.sum(Reward.amount),0)).where(Reward.reward_rule_id==rule.id,Reward.campaign_id==campaign.id,Reward.is_demo.is_(False),Reward.status.notin_(["reversed","rejected"]))) or 0))
-            amount=min(amount,max(ZERO,cash(rule.max_campaign_total)-rule_campaign_used_before))
+        if rule_id and creator_cap is not None:
+            creator_used_before=cash(Decimal(db.scalar(select(func.coalesce(func.sum(Reward.amount),0)).where(Reward.reward_rule_id==rule_id,Reward.creator_id==referral.creator_id,Reward.is_demo.is_(False),Reward.status.notin_(["reversed","rejected"]))) or 0))
+            amount=min(amount,max(ZERO,cash(creator_cap-creator_used_before)))
+        if rule_id and campaign_cap is not None:
+            rule_campaign_used_before=cash(Decimal(db.scalar(select(func.coalesce(func.sum(Reward.amount),0)).where(Reward.reward_rule_id==rule_id,Reward.campaign_id==campaign.id,Reward.is_demo.is_(False),Reward.status.notin_(["reversed","rejected"]))) or 0))
+            amount=min(amount,max(ZERO,cash(campaign_cap-rule_campaign_used_before)))
         if campaign_budget_limit is not None:
             campaign_budget_used_before=cash(Decimal(db.scalar(select(func.coalesce(func.sum(Reward.amount),0)).where(Reward.campaign_id==campaign.id,Reward.is_demo.is_(False),Reward.status.notin_(["reversed","rejected"]))) or 0))
-            amount=min(amount,max(ZERO,campaign_budget_limit-campaign_budget_used_before))
+            amount=min(amount,max(ZERO,cash(campaign_budget_limit-campaign_budget_used_before)))
     amount=cash(amount)
     if amount<=0:return None
     risk=_is_open_risk(db,referral.id,conversion.id)
+    disputed=_has_open_dispute(db,order_id=order.id,conversion_id=conversion.id,referral_id=referral.id)
+    creator=db.get(User,referral.creator_id)
+    creator_suspended=not creator or not creator.is_active
+    dispute_hold=bool(disputed and not demo)
     if demo: status="simulated"
-    elif stage=="collection": status="under_review" if risk else "pending"
+    elif stage=="collection": status="under_review" if (risk or disputed or creator_suspended) else "pending"
     else: status="pending_collection"
-    snapshot={"legacy":False,"rule_source":rule_source,"rule_id":rule.id if rule else None,
+    prior_status="under_review" if risk or creator_suspended else "pending"
+    snapshot={"legacy":False,"rule_source":rule_source,"rule_id":rule_id,
         "reward_type":reward_type,"rate":str(rate) if rate is not None else None,"fixed_amount":str(fixed) if fixed is not None else None,
         "currency":currency,"original_order_amount":str(cash(order.amount)),"eligible_amount":str(eligible_amount),
-        "excluded_amount":str(cash(Decimal(order.amount)-eligible_amount)),"item_ids":ids,
-        "items":[{"order_item_id":line.id,"product_id":line.product_id,"quantity":line.quantity,"line_total":str(cash(line.line_total))} for line in lines],
-        "maximum_per_reward":str(rule.max_reward) if rule and rule.max_reward is not None else None,
-        "creator_cap":str(rule.max_creator_total) if rule and rule.max_creator_total is not None else None,
+        "excluded_amount":str(cash(Decimal(order.amount)-eligible_amount)),"item_ids":[line.id for line in lines],
+        "items":[{"order_item_id":line.id,"product_id":(line.reward_snapshot or {}).get("product_id",line.product_id),"quantity":line.quantity,"line_total":str(cash(line.line_total))} for line in lines],
+        "maximum_per_reward":str(max_reward) if max_reward is not None else None,
+        "creator_cap":str(creator_cap) if creator_cap is not None else None,
         "creator_total_used_before":str(creator_used_before),
-        "campaign_cap":str(rule.max_campaign_total) if rule and rule.max_campaign_total is not None else None,
+        "campaign_cap":str(campaign_cap) if campaign_cap is not None else None,
         "rule_campaign_total_used_before":str(rule_campaign_used_before),
         "campaign_budget":str(campaign_budget_limit) if campaign_budget_limit is not None else None,
         "campaign_budget_used_before":str(campaign_budget_used_before),
-        "formula":formula,"rounding":"ROUND_HALF_UP","calculated_amount":str(amount),"simulation":demo}
+        "formula":formula,"rounding":"ROUND_HALF_UP","calculated_amount":str(amount),"simulation":demo,
+        "terms_frozen_at_checkout":bool(pricing_snapshot)}
     reward=Reward(order_id=order.id,creator_id=referral.creator_id,brand_id=campaign.brand_id,campaign_id=campaign.id,
-        conversion_id=conversion.id,referral_id=referral.id,order_item_id=ids[0] if len(ids)==1 else None,product_id=product.id if len({x.product_id for x in lines})==1 else None,
-        reward_rule_id=rule.id if rule else None,source_key=source,amount=amount,eligible_amount=eligible_amount,
+        conversion_id=conversion.id,referral_id=referral.id,order_item_id=lines[0].id if len(lines)==1 else None,product_id=product_id,
+        reward_rule_id=rule_id,source_key=source,amount=amount,eligible_amount=eligible_amount,
         excluded_amount=cash(Decimal(order.amount)-eligible_amount),currency=currency,reward_type=reward_type,reward_rate=rate,
         fixed_amount=fixed,calculation_formula=formula,rounding_rule="ROUND_HALF_UP",calculation_snapshot=snapshot,
-        status=status,risk_status="under_review" if risk else "clear",eligible_at=(order.created_at or datetime.now(timezone.utc))+timedelta(days=HOLD_DAYS),is_demo=demo)
+        status=status,risk_status="under_review" if risk else "clear",dispute_hold=dispute_hold,
+        dispute_prior_status=prior_status if dispute_hold else None,
+        eligible_at=(order.created_at or datetime.now(timezone.utc))+timedelta(days=HOLD_DAYS),is_demo=demo)
     db.add(reward);db.flush()
     _event(db,reward,f"created:{source}","reward_created",None,status,actor_id,
-        "Simulated reward; no payable liability created." if demo else ("Awaiting COD collection." if stage=="checkout" else "Reward calculated from eligible attributed items."),snapshot)
+        "Simulated reward; no payable liability created." if demo else ("Held for open dispute." if disputed else ("Awaiting COD collection." if stage=="checkout" else "Reward calculated from eligible attributed items.")),snapshot)
     if demo:
         _ledger(db,key=f"demo-reward:{source}",user_id=referral.creator_id,reward_id=reward.id,order=order,conversion=conversion,
             campaign_id=campaign.id,entry_type="SIMULATED_REWARD_RECORDED",amount=amount,direction="memo",actor_id=None,
@@ -215,29 +314,54 @@ def generate_order_rewards(db: Session, order: Order, *, stage: str, actor_id: i
         return []
     customer=db.get(User,order.customer_id) if order.customer_id else None
     if not customer:return []
-    lines=db.execute(select(OrderItem,Referral,Campaign,Product).join(Referral,Referral.id==OrderItem.referral_id)
-        .join(Campaign,Campaign.id==Referral.campaign_id).join(Product,Product.id==OrderItem.product_id)
+    lines=db.execute(select(OrderItem,Referral,Campaign).join(Referral,Referral.id==OrderItem.referral_id)
+        .join(Campaign,Campaign.id==Referral.campaign_id)
         .where(OrderItem.order_id==order.id,OrderItem.referral_id.is_not(None)).order_by(OrderItem.id)).all()
     groups={}
-    for line,referral,campaign,product in lines:
-        ok,_reason=referral_eligibility(db,referral,product,at=order.created_at or datetime.now(timezone.utc))
-        if not ok or self_referral(db,referral,customer):
-            if self_referral(db,referral,customer):
-                flag_risk(db,"SELF_REFERRAL",referral_id=referral.id,conversion_id=conversion.id,customer_id=customer.id,
-                    visitor_hash=conversion.visitor_hash,details="Buyer matches the referred creator account/email.")
+    for line,referral,campaign in lines:
+        product=db.get(Product,line.product_id) if line.product_id is not None else None
+        terms=line.reward_snapshot
+        if terms:
+            valid_snapshot=(terms.get("version")==1 and terms.get("referral_id")==referral.id
+                and terms.get("creator_id")==referral.creator_id and terms.get("campaign_id")==campaign.id
+                and terms.get("brand_id")==campaign.brand_id)
+            if not valid_snapshot:
+                flag_risk(db,"ATTRIBUTION_SNAPSHOT_MISMATCH",referral_id=referral.id,conversion_id=conversion.id,
+                    customer_id=customer.id,visitor_hash=conversion.visitor_hash,details="Stored checkout terms failed integrity validation.")
+                continue
+            key=(referral.creator_id,campaign.id,terms.get("rule_id") or f"default:{campaign.id}")
+        else:
+            # Legacy orders predate checkout snapshots; apply the prior validation rules.
+            ok,_reason=referral_eligibility(db,referral,product,at=order.created_at or datetime.now(timezone.utc))
+            if not ok or product is None:
+                continue
+            rule,rule_source=select_reward_rule(db,campaign,product,order.created_at or datetime.now(timezone.utc))
+            terms=None
+            key=(referral.creator_id,campaign.id,rule.id if rule else f"default:{campaign.id}")
+        if self_referral(db,referral,customer):
+            flag_risk(db,"SELF_REFERRAL",referral_id=referral.id,conversion_id=conversion.id,customer_id=customer.id,
+                visitor_hash=conversion.visitor_hash,details="Buyer matches the referred creator account/email.")
             continue
-        rule,rule_source=select_reward_rule(db,campaign,product,order.created_at or datetime.now(timezone.utc))
-        key=(referral.creator_id,campaign.id,rule.id if rule else f"default:{campaign.id}")
-        groups.setdefault(key,{"referral":referral,"campaign":campaign,"product":product,"items":[]})["items"].append(line)
+        group=groups.setdefault(key,{"referral":referral,"campaign":campaign,"product":product,"items":[],"terms":terms})
+        group["items"].append(line)
     result=[]
     for group in groups.values():
+        product_ids={(line.reward_snapshot or {}).get("product_id",line.product_id) for line in group["items"]}
+        reward_product=db.get(Product,next(iter(product_ids))) if len(product_ids)==1 and next(iter(product_ids)) is not None else group["product"]
         reward=_record_reward(db,order=order,conversion=conversion,referral=group["referral"],campaign=group["campaign"],
-            product=group["product"],lines=group["items"],customer=customer,demo=stage=="demo",stage=stage,actor_id=actor_id)
+            product=reward_product,lines=group["items"],customer=customer,demo=stage=="demo",stage=stage,
+            pricing_snapshot=group["terms"],actor_id=actor_id)
         if reward:
             result.append(reward)
             if stage=="demo":
                 title="Simulated reward recorded"
                 notice=f"A simulated reward record was created for order {order.public_id}. It is not payable and no money was transferred."
+            elif reward.dispute_hold:
+                title="Reward held for dispute review"
+                notice=f"A reward record for order {order.public_id} is held while an associated dispute remains open. No money was transferred."
+            elif reward.status=="under_review":
+                title="Reward under review"
+                notice=f"A reward record for order {order.public_id} is under review. It cannot be approved while the creator account is restricted or a risk review is open."
             else:
                 title="Reward record updated"
                 notice=f"A reward record for order {order.public_id} was created after cash collection was recorded. This is a platform ledger entry, not a payout or money transfer."
@@ -277,6 +401,8 @@ def _reverse_reward(db: Session, reward: Reward, *, actor_id: int, reason: str, 
 
 def approve_reward(db: Session, reward: Reward, actor_id: int):
     if reward.is_demo: raise ValueError("Simulated demo rewards cannot be approved or paid")
+    creator=db.scalar(select(User).where(User.id==reward.creator_id).with_for_update())
+    if not creator or not creator.is_active: raise ValueError("Suspended creators cannot have rewards approved")
     if reward.status not in {"pending","under_review"}: raise ValueError("Reward is not awaiting approval")
     if utc(reward.eligible_at)>datetime.now(timezone.utc): raise ValueError("Reward hold period has not elapsed")
     order=db.get(Order,reward.order_id);conversion=db.get(Conversion,reward.conversion_id) if reward.conversion_id else None
@@ -311,6 +437,8 @@ def reverse_reward(db: Session, reward: Reward, actor_id: int, reason: str):
 
 def record_simulated_payout(db: Session, reward: Reward, actor_id: int):
     if reward.status!="approved" or reward.is_demo: raise ValueError("Only approved non-simulated rewards can be recorded in a payout simulation")
+    creator=db.scalar(select(User).where(User.id==reward.creator_id).with_for_update())
+    if not creator or not creator.is_active: raise ValueError("Suspended creators cannot receive payout simulations")
     if reward.conversion_id and _reward_has_open_risk(db,reward,reward.conversion_id):
         raise ValueError("Reward has an open risk flag and cannot be recorded in a payout simulation")
     if db.scalar(select(SimulatedPayout.id).where(SimulatedPayout.reward_id==reward.id)):

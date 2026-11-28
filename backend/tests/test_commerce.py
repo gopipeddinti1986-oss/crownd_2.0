@@ -420,8 +420,14 @@ def test_cod_referral_reward_is_created_only_after_admin_collection(commerce_db,
     order = commerce_client.post("/api/v1/checkout", headers={**customer, "Idempotency-Key": "cod-referral-order-001"}, json={**address(), "payment_method": "cod"}).json()
     with commerce_db() as db:
         order_row = db.scalar(select(Order).where(Order.public_id == order["id"]))
+        order_item = db.scalar(select(OrderItem).where(OrderItem.order_id == order_row.id))
+        assert Decimal(order_item.reward_snapshot["rate"]) == Decimal("10")
+        assert order_item.reward_snapshot["creator_id"] == creator_id
         assert db.scalar(select(Reward).where(Reward.order_id == order_row.id)) is None
         assert db.scalar(select(LedgerEntry.id).where(LedgerEntry.order_id == order_row.id)) is None
+        campaign_row = db.scalar(select(Campaign).where(Campaign.id == order_item.reward_snapshot["campaign_id"]))
+        campaign_row.reward_rate = Decimal("25.00")
+        db.commit()
     for status in ("processing", "shipped", "delivered"):
         assert commerce_client.patch(f"/api/v1/orders/{order['id']}/status", headers=admin, json={"status": status}).status_code == 200
     assert commerce_client.post(f"/api/v1/admin/orders/{order['id']}/collect-payment", headers=admin).status_code == 200
@@ -429,6 +435,22 @@ def test_cod_referral_reward_is_created_only_after_admin_collection(commerce_db,
         stored = db.scalar(select(Order).where(Order.public_id == order["id"]))
         reward = db.scalar(select(Reward).where(Reward.order_id == stored.id))
         assert reward and reward.creator_id == creator_id and reward.is_demo is False and reward.status == "pending"
+        assert reward.amount == Decimal("10.00"), "COD collection must use terms snapshotted at checkout, not edited campaign terms"
+        reward_id = reward.id
+    opened = commerce_client.post("/api/v1/disputes", headers=customer,
+        json={"order_id": order["id"], "summary": "COD reward review", "reason": "Please review this attributed order"})
+    assert opened.status_code == 201
+    case_id = opened.json()["id"]
+    with commerce_db() as db:
+        held = db.get(Reward, reward_id)
+        assert held.dispute_hold is True and held.status == "under_review"
+        ledger_before = [(row.id, row.amount, row.direction) for row in db.scalars(select(LedgerEntry).where(LedgerEntry.reward_id == reward_id).order_by(LedgerEntry.id)).all()]
+    assert commerce_client.post(f"/api/v1/admin/disputes/{case_id}/status", headers=admin,
+        json={"status": "resolved", "reason": "Review completed with no financial correction", "confirmation": "RESOLVED"}).status_code == 200
+    with commerce_db() as db:
+        released = db.get(Reward, reward_id)
+        assert released.dispute_hold is False and released.status == "pending"
+        assert [(row.id, row.amount, row.direction) for row in db.scalars(select(LedgerEntry).where(LedgerEntry.reward_id == reward_id).order_by(LedgerEntry.id)).all()] == ledger_before
     creator_rewards = commerce_client.get("/api/v1/rewards/me", headers=creator).json()
     assert len(creator_rewards) == 1 and creator_rewards[0]["is_demo"] is False and creator_rewards[0]["payable"] is False
     reward_id = creator_rewards[0]["id"]
@@ -565,6 +587,12 @@ def test_phase5_mixed_cart_creates_idempotent_item_attributed_rewards_for_multip
         page=commerce_client.get("/api/v1/creator/rewards",headers=headers).json()
         assert page["total"]==1 and page["items"][0]["is_demo"] is False
         assert "customer_email" not in str(page) and "customer_id" not in str(page)
+    for headers, creator_id in ((creator_headers_a, creator_a), (creator_headers_b, creator_b)):
+        creator_page = commerce_client.get("/api/v1/creator/conversions", headers=headers).json()
+        assert creator_page["total"] == 1
+        assert creator_page["items"][0]["creator_id"] == creator_id
+        assert creator_page["items"][0]["attributed_amount"] == "100.00"
+        assert len(creator_page["items"][0]["attribution_lines"]) == 1
     replay=commerce_client.post("/api/v1/checkout",headers={**customer,"Idempotency-Key":"phase5-multi-creator-cart"},json={**address(),"payment_method":"demo"})
     assert replay.status_code==200
     with commerce_db() as db:

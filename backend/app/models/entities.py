@@ -298,6 +298,7 @@ class OrderItem(Base):
     quantity: Mapped[int] = mapped_column(Integer)
     line_total: Mapped[Decimal] = mapped_column(Numeric(12,2))
     referral_id: Mapped[int | None] = mapped_column(ForeignKey("referrals.id", ondelete="SET NULL"), nullable=True, index=True)
+    reward_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 class RewardRule(Base):
     __tablename__ = "reward_rules"
@@ -353,6 +354,8 @@ class Reward(Base):
     calculation_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
     risk_status: Mapped[str] = mapped_column(String(20), default="clear", index=True)
+    dispute_hold: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    dispute_prior_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
     eligible_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     is_demo: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
@@ -404,10 +407,12 @@ class SimulatedPayout(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 def _deny_ledger_mutation(*_args):
-    raise ValueError("Ledger entries are immutable; append a reversal instead.")
+    raise ValueError("Historical financial and order records are immutable; append a correction or reversal instead.")
 
 event.listen(LedgerEntry, "before_update", _deny_ledger_mutation)
 event.listen(LedgerEntry, "before_delete", _deny_ledger_mutation)
+event.listen(OrderItem, "before_update", _deny_ledger_mutation)
+event.listen(OrderItem, "before_delete", _deny_ledger_mutation)
 event.listen(RewardEvent, "before_update", _deny_ledger_mutation)
 event.listen(RewardEvent, "before_delete", _deny_ledger_mutation)
 

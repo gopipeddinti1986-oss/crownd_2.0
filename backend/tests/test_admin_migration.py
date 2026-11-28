@@ -19,7 +19,7 @@ def test_platform_admin_migration_historical_upgrade_and_non_destructive_reupgra
     conn.commit(); conn.close()
     command.upgrade(config, "head")
     conn = sqlite3.connect(database)
-    assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0009_notifications"
+    assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0010_integration_snapshots"
     assert "verification" in {row[1] for row in conn.execute("PRAGMA table_info(creator_profiles)")}
     assert conn.execute("SELECT user_id, username, verification FROM creator_profiles WHERE user_id=50").fetchone() == (50, "existing_creator", "unverified")
     assert {"admin_audit_events", "admin_disputes", "admin_dispute_events"} <= {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -38,5 +38,5 @@ def test_platform_admin_migration_historical_upgrade_and_non_destructive_reupgra
     command.downgrade(config, "0007_campaign_intelligence")
     command.upgrade(config, "head")
     conn = sqlite3.connect(database)
-    assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0009_notifications"
+    assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0010_integration_snapshots"
     conn.close()
