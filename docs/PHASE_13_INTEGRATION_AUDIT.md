@@ -30,6 +30,19 @@ Reviewed the commerce, attribution, conversion, reward/ledger, analytics, campai
 - Checkout reward terms are added as nullable snapshot data; existing order/reward history is retained. No database was used for data backfill.
 - Demo rewards remain non-payable simulations. COD rewards are generated only after administrator-recorded collection. CROWND records do not initiate a money transfer.
 
+## Workflow coverage matrix (continuation)
+
+| Required workflow | Local persisted-state evidence | PostgreSQL/browser scope |
+|---|---|---|
+| A. Customer purchase | Existing tests cover stock/price server truth, cart ownership/quantity, checkout idempotency, payment/COD state, order ownership/history and cancellation. `test_inventory_race_guard_unavailable_cart_and_cancel_restores_stock` now also asserts a second cancellation leaves stock unchanged. | Last-item competing checkout test is opt-in PostgreSQL and skipped here. Browser E2E not run.
+| B. Creator attribution | Existing referral, mixed-cart conversion/reward/ledger/analytics and duplicate-checkout tests; new `test_attribution_expiry_and_campaign_expiration_preserve_historical_conversion` covers expired attribution and retention of historical conversion/reward. `test_tampered_reward_snapshot_is_flagged_and_not_credited` verifies corrupted snapshot product attribution creates an open risk flag and no reward/ledger credit. | Concurrent same-key conversion/reward test is opt-in PostgreSQL and skipped. Browser E2E not run.
+| C. Campaign lifecycle | Existing brand ownership, application transition, product association and date-window tests; new expiry test confirms new application/referral/conversion is rejected while historical conversion remains. COD snapshot test changes campaign reward rate after checkout and verifies frozen terms. | PostgreSQL campaign/suspension races not run.
+| D. Inventory | Existing create/update/deactivate/checkout/restock tests; repeat cancellation asserts no duplicate restock. Optional last-item checkout and simultaneous cart creation tests are present. | Both concurrency tests skipped without PostgreSQL; SQLite is not a substitute.
+| E. Reward lifecycle | Existing generation, COD gating, demo disclosure, ledger immutability, approval/payout simulation/reversal tests; COD test asserts snapshot terms and dispute hold/release without ledger mutation. Optional overlapping dispute test added. | PostgreSQL reward/dispute contention skipped; actual payout/refund transfer is not supported by product scope.
+| F. Account suspension | Existing suspended-brand purchase/content/application restrictions extended through reactivation. New creator test verifies session revocation, referral exclusion, no new conversion/reward, in-app security notices, re-login after reactivation, and retention of prior conversion/reward. | PostgreSQL races against checkout/acceptance/payout not run.
+| G. Admin | Existing lifecycle, product/campaign moderation, verification, risk review, orders, rewards, disputes and audit-log authorization/history tests. | No parallel admin moderation test on PostgreSQL; no browser E2E.
+| H. Notifications | Existing recipient scoping, read/unread, deterministic event idempotency, preferences, outbox encryption/retry/failure/redaction tests; new lifecycle and dispute flows assert recipient notifications. | No live SMTP, worker multi-process or PostgreSQL outbox test. Browser E2E not run.
+
 ## Phase 13 status
 
 The audit has produced implementation and regression tests, not just recommendations. Local backend tests pass (exact results are in [`PHASE_13_IMPLEMENTATION_LOG.md`](PHASE_13_IMPLEMENTATION_LOG.md)). Phase 13 remains **in progress / not complete** until the outstanding isolated PostgreSQL migration, concurrency, and cross-process checks are executed and remaining risks are reviewed. No production-readiness claim is made.

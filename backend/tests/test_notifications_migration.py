@@ -15,9 +15,12 @@ def test_notifications_migration_is_additive_and_repeatable(tmp_path, monkeypatc
     conn = sqlite3.connect(database)
     conn.execute("INSERT INTO users(id,name,email,password_hash,role,is_active,email_verified,created_at) VALUES(81,'Existing','existing@example.test','hash','customer',1,1,'2026-01-01T00:00:00+00:00')")
     # The legacy 0001 revision creates current metadata on fresh schemas; remove
-    # Phase 8 tables to emulate an actual historical 0008 database before upgrade.
+    # Phase 8/13 additions to emulate a historical 0008 database before upgrade.
     for table in ("email_deliveries", "notifications", "notification_preferences"):
         conn.execute(f'DROP TABLE "{table}"')
+    conn.execute("ALTER TABLE order_items DROP COLUMN reward_snapshot")
+    conn.execute("ALTER TABLE rewards DROP COLUMN dispute_prior_status")
+    conn.execute("ALTER TABLE rewards DROP COLUMN dispute_hold")
     conn.commit()
     conn.close()
     command.upgrade(config, "head")
@@ -28,6 +31,17 @@ def test_notifications_migration_is_additive_and_repeatable(tmp_path, monkeypatc
     assert {"dispute_hold", "dispute_prior_status"} <= {row[1] for row in conn.execute("PRAGMA table_info(rewards)")}
     assert conn.execute("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name='order_items_no_update'").fetchone()[0] == 1
     assert conn.execute("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name='order_items_no_delete'").fetchone()[0] == 1
+    conn.execute("INSERT INTO products(id,brand_id,name,slug,description,category,price,stock,status,image_url,image_urls,specifications,created_at) VALUES(91,81,'Snapshot product','snapshot-product','','Other','12.00',1,'active','','[]','{}','2026-01-01T00:00:00+00:00')")
+    conn.execute("INSERT INTO orders(id,public_id,customer_name,customer_email,product_id,quantity,amount,payment_status,payment_method,currency,status,created_at,updated_at) VALUES(91,'SNAPSHOT-ORDER','Existing','existing@example.test',91,1,'12.00','unpaid','cod','INR','confirmed','2026-01-01T00:00:00+00:00','2026-01-01T00:00:00+00:00')")
+    conn.execute("INSERT INTO order_items(id,order_id,product_id,product_name,brand_name,image_url,unit_price,quantity,line_total,referral_id,reward_snapshot) VALUES(91,91,91,'Snapshot product','Existing brand','',12,1,12,NULL,'{}')")
+    conn.commit()
+    for statement in ("UPDATE order_items SET line_total=0 WHERE id=91", "DELETE FROM order_items WHERE id=91"):
+        try:
+            conn.execute(statement)
+            raise AssertionError(f"Order item append-only trigger allowed: {statement}")
+        except sqlite3.IntegrityError:
+            conn.rollback()
+    assert conn.execute("SELECT line_total FROM order_items WHERE id=91").fetchone()[0] == 12
     assert {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")} >= {
         "notification_preferences", "notifications", "email_deliveries"}
     for table in ("notification_preferences", "notifications", "email_deliveries"):

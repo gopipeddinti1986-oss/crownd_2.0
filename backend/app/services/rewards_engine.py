@@ -322,9 +322,14 @@ def generate_order_rewards(db: Session, order: Order, *, stage: str, actor_id: i
         product=db.get(Product,line.product_id) if line.product_id is not None else None
         terms=line.reward_snapshot
         if terms:
+            try:
+                snapshot_product_id = int(terms.get("product_id"))
+            except (TypeError, ValueError):
+                snapshot_product_id = None
             valid_snapshot=(terms.get("version")==1 and terms.get("referral_id")==referral.id
                 and terms.get("creator_id")==referral.creator_id and terms.get("campaign_id")==campaign.id
-                and terms.get("brand_id")==campaign.brand_id)
+                and terms.get("brand_id")==campaign.brand_id and snapshot_product_id==line.product_id
+                and line.product_id is not None and product is not None and product.brand_id==campaign.brand_id)
             if not valid_snapshot:
                 flag_risk(db,"ATTRIBUTION_SNAPSHOT_MISMATCH",referral_id=referral.id,conversion_id=conversion.id,
                     customer_id=customer.id,visitor_hash=conversion.visitor_hash,details="Stored checkout terms failed integrity validation.")

@@ -1,8 +1,8 @@
 # Phase 13 — Implementation log
 
-**Status:** In progress; implemented locally, not complete.  
+**Status:** In progress; local SQLite and frontend checks pass, PostgreSQL integration suite is prepared but skipped because no approved disposable instance is available.
 **Branch:** `arena/e6c9b4f7-crownd-2-0`  
-**Database safety:** All test database use in this phase was disposable SQLite; the connected Supabase project and production data were not touched.
+**Database safety:** Executed tests used disposable SQLite. The PostgreSQL suite is opt-in and scopes its schema in a database explicitly acknowledged as disposable. The connected Supabase project and production data were not accessed or modified.
 
 ## Work performed
 
@@ -26,19 +26,24 @@
    - Referral counters/creator analytics use item-level attribution; brand product filters allow historically attributed products without misrepresenting current eligibility.
 
 5. **Regression tests**
-   - Extended COD integration coverage: persisted checkout snapshot, campaign terms changed before collection, frozen-rate reward, dispute hold/release, unchanged ledger history.
+   - Extended COD integration coverage: persisted checkout snapshot, campaign terms changed before collection, frozen-rate reward, dispute hold/release, unchanged ledger history. Added tampered-product snapshot test; COD collection flags the mismatch and creates no reward or ledger credit.
    - Extended mixed-cart coverage: persisted rewards/ledger and each creator's scoped conversion amount/attribution lines.
-   - Migration tests now assert `0010_integration_snapshots` as the head and verify columns and SQLite append-only triggers, including historical upgrade/re-upgrade paths.
+   - Added attribution-expiry/campaign-expiry coverage that verifies old conversions/rewards remain intact and expired attribution cannot create new ones.
+   - Extended brand lifecycle coverage through reactivation; added creator suspension/reactivation coverage across sessions, referral use, new orders, notifications and retained historical conversion/reward rows.
+   - Cancellation replay now asserts stock is not restored twice. Migration coverage removes the new columns from an 0009-shaped temporary SQLite DB, verifies 0010 adds them, then executes UPDATE/DELETE statements to prove SQLite triggers reject mutation.
+   - Added opt-in PostgreSQL tests for actual 0009→0010 upgrade/downgrade/re-upgrade and trigger enforcement, concurrent last-item checkout, concurrent cart creation + same-key attributed checkout, and concurrent overlapping disputes. These are **not executed** without an approved disposable PostgreSQL URL.
 
-## Verification executed
+## Verification executed (continuation)
 
-- `cd backend && ./.venv/bin/pytest -q` — **81 passed**, 1 warning, in 25.39s. The warning is upstream `StarletteDeprecationWarning` about `httpx` with `starlette.testclient`.
-- From `backend/`, `python -m compileall -q app migrations tests` — passed after the final source edits.
-- `git diff --check` — passed after the final source/docs edits.
-- Credential-pattern scan over tracked diff and all three untracked deliverables — no obvious hard-coded credentials found.
+- `cd backend && ./.venv/bin/pytest -q` — **84 passed, 4 skipped**, 1 warning, in 26.33s. Skips are the four explicit PostgreSQL-only tests in `tests/test_phase13_postgres.py`; they skip because no disposable DB URL/acknowledgment is configured. The warning is upstream `StarletteDeprecationWarning` about `httpx` with `starlette.testclient`.
+- `cd backend && python -m compileall -q app migrations tests` — passed.
+- `cd frontend && npm test -- --run` — **54 passed across 14 files**. Two existing Recharts zero-size warnings appear in jsdom chart tests.
+- `cd frontend && npm run lint` — passed.
+- `cd frontend && npm run build` — passed, including `tsc -b` and production Vite build.
+- Migration tests ran on disposable temporary SQLite databases. The historical-path test removes the three 0010 columns before `upgrade head`, confirms column addition and proves SQLite triggers reject raw UPDATE/DELETE. The supported downgrade is deliberately non-destructive; columns/triggers persist and re-upgrade succeeds.
 - `cd backend && ./.venv/bin/alembic heads` — `0010_integration_snapshots (head)`.
-- Migration tests run as part of the backend suite on temporary SQLite databases, including fresh/historical upgrades and downgrade/re-upgrade. No PostgreSQL migration test was run.
-- No frontend tests, lint/build, live SMTP, worker multi-process, PostgreSQL, Docker/Compose, browser E2E, backup/restore, deployment or production smoke checks were run in this Phase 13 turn.
+- Final `git diff --check`, secret-pattern scan and branch synchronization are pending until the continuation changes/docs are committed.
+- No PostgreSQL test ran. No Docker/Compose, browser E2E, live SMTP acceptance, multi-worker runtime, backup/restore, deployment or production smoke checks ran.
 
 ## Defects found while validating and fixed
 
@@ -51,12 +56,12 @@
 
 - Backend: `app/api/v1/admin.py`, `app/api/v1/analytics.py`, `app/api/v1/commerce.py`, `app/api/v1/campaigns.py`, `app/api/v1/routes.py`, `app/models/entities.py`, `app/services/rewards_engine.py`.
 - Migration: `migrations/versions/0010_integration_snapshots.py`.
-- Tests: `tests/test_commerce.py`, `tests/test_admin_migration.py`, `tests/test_campaign_migration.py`, `tests/test_notifications_migration.py`.
+- Tests: `tests/test_commerce.py`, `tests/test_phase13_postgres.py`, `tests/test_admin_migration.py`, `tests/test_campaign_migration.py`, `tests/test_notifications_migration.py`.
 - Required project records: `docs/PHASE_13_INTEGRATION_AUDIT.md`, this log, `IMPLEMENTATION_STATUS.md`, and `docs/DEVELOPMENT_ROADMAP.md`.
 
-## Remaining blockers and next checks
+## PostgreSQL blocker and next checks
 
-- No approved isolated PostgreSQL endpoint is available. Do not use connected Supabase. PostgreSQL locking, inventory races, simultaneous idempotency retries, campaign suspension races, migration DDL/trigger behavior and multi-worker notification idempotency remain unverified.
-- Add synchronized multi-session integration tests against a disposable PostgreSQL database when a safe target is available; retain tests for persisted-state invariants.
-- Final source checks completed: `compileall`, full backend suite, `git diff --check`, secret-pattern scan, and review of the integration diff. Frontend checks were not run because this implementation changes backend/data paths only; assess frontend contract regressions in follow-up.
-- Implementation checkpoint `7022f78` (`Phase 13: harden cross-module integration paths`) and documentation checkpoint `ea6b4c2` were pushed to the development branch without force. At verification, local and `origin/arena/e6c9b4f7-crownd-2-0` both resolved to `ea6b4c200b48f37abcfb5071bd950845ea29a640`, and the worktree was clean. No shared-database migration or Phase 13 completion claim is made.
+- Exact blocker at continuation: `psql`, `postgres`, `initdb`, `pg_ctl`, `pg_isready`, Docker and Podman are unavailable; port 5432 is not listening; neither `CROWND_PHASE13_DISPOSABLE_POSTGRES_URL` nor `CROWND_PHASE13_POSTGRES_ACK` is configured. No endpoint was supplied. The existing connected Supabase project was not inspected or used, per the safety instruction.
+- Minimal safe provisioning: provide a newly created, short-lived PostgreSQL database (not the connected Supabase project and not production) whose database name contains `test`, `disposable`, or `phase13`, with a dedicated role allowed to create/drop a schema. Run from `backend/` with `CROWND_PHASE13_DISPOSABLE_POSTGRES_URL=<that URL>` and `CROWND_PHASE13_POSTGRES_ACK=I_AM_USING_A_DISPOSABLE_DATABASE`. The opt-in tests create a random `phase13_<uuid>` schema, migrate/test only within it, and drop that schema. Do not use Docker or modify WSL to provision it.
+- Until that target is available, PostgreSQL migration DDL/triggers, transaction rollback, checkout/stock/cart/reward/dispute concurrency and multi-worker notification semantics remain unverified. The optional tests are present but skipped; their presence is not verification.
+- Re-run the full backend suite, frontend test/lint/build, `compileall`, `git diff --check`, secret-pattern scan and branch sync after any further code changes. No shared-database migration or Phase 13 completion claim is made.

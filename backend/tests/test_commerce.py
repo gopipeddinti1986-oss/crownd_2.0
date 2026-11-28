@@ -1,8 +1,8 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from fastapi.testclient import TestClient
 import pytest
-from sqlalchemy import create_engine, select, func
+from sqlalchemy import create_engine, select, func, update
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from app.api.v1.auth import limiter
@@ -201,6 +201,12 @@ def test_inventory_race_guard_unavailable_cart_and_cancel_restores_stock(commerc
     assert cancelled.status_code == 200 and cancelled.json()["status"] == "cancelled"
     assert commerce_client.get("/api/v1/products", params={"brand_id": brand}).json()["items"][0]["stock"] == 2
     assert commerce_client.post(f"/api/v1/orders/{first.json()['id']}/cancel", headers=customer_headers).status_code == 409
+    with commerce_db() as db:
+        stored_order = db.scalar(select(Order).where(Order.public_id == first.json()["id"]))
+        assert stored_order.status == "cancelled"
+        assert db.get(Product, product_id).stock == 2, "replayed cancellation must not restock a second time"
+    customer_history = commerce_client.get("/api/v1/orders", headers=customer_headers).json()
+    assert customer_history["total"] == 1 and customer_history["items"][0]["status"] == "cancelled"
     assert commerce_client.patch(f"/api/v1/orders/{first.json()['id']}/status", headers=brand_headers, json={"status": "processing"}).status_code == 403
 
 
@@ -301,6 +307,12 @@ def test_suspended_brand_content_is_hidden_and_cannot_be_purchased(commerce_db, 
     with commerce_db() as db:
         assert db.get(Product, product_id).stock == 3
         assert db.scalar(select(func.count(Order.id))) == 0
+    restored = commerce_client.post(f"/api/v1/admin/users/{brand_id}/lifecycle", headers=admin,
+        json={"active": True, "reason": "Seller review completed", "confirmation": "REACTIVATE"})
+    assert restored.status_code == 200
+    assert commerce_client.get(f"/api/v1/products/{product_id}").status_code == 200
+    assert commerce_client.get(f"/api/v1/campaigns/{campaign_id}").status_code == 200
+    assert add_to_cart(commerce_client, customer, product_id).status_code == 201
 
 
 def test_demo_payment_is_backend_simulated_idempotent_and_identified(commerce_db, commerce_client):
@@ -364,6 +376,10 @@ def test_cod_stays_unpaid_through_delivery_and_admin_collection_is_audited(comme
     assert payload["transaction_reference"].startswith("COD-COLLECT-")
     assert payload["payment_confirmed_by"]["role"] == "admin" and payload["payment_confirmed_at"]
     assert commerce_client.post(f"/api/v1/admin/orders/{order['id']}/collect-payment", headers=admin).status_code == 409
+    customer_inbox = commerce_client.get("/api/v1/notifications", headers=customer)
+    brand_inbox = commerce_client.get("/api/v1/notifications", headers=brand_headers)
+    assert customer_inbox.status_code == 200 and any(item["title"] == "Order placed" for item in customer_inbox.json()["items"])
+    assert brand_inbox.status_code == 200 and {"New customer order", "COD collection recorded"} <= {item["title"] for item in brand_inbox.json()["items"]}
     with commerce_db() as db:
         stored = db.scalar(select(Order).where(Order.public_id == order["id"]))
         attempt = db.scalar(select(PaymentAttempt).where(PaymentAttempt.order_id == stored.id))
@@ -795,3 +811,172 @@ def test_phase4_self_referral_is_ineligible_and_flagged(commerce_db):
         assert conversion.status=="ineligible" and conversion.reason=="self_referral" and conversion.attributed_amount==Decimal("0.00")
         assert db.scalar(select(ReferralRiskFlag).where(ReferralRiskFlag.risk_code=="SELF_REFERRAL")) is not None
         assert db.scalar(select(Reward).where(Reward.order_id==order.id)) is None
+
+
+def test_attribution_expiry_and_campaign_expiration_preserve_historical_conversion(commerce_db, commerce_client):
+    brand_id, brand = create_account(commerce_db, "Expiry Brand", "expiry-brand@example.com", "brand")
+    creator_id, creator = create_account(commerce_db, "Expiry Creator", "expiry-creator@example.com", "creator")
+    _later_creator_id, later_creator = create_account(commerce_db, "Later Creator", "later-creator@example.com", "creator")
+    customer_id, customer = create_account(commerce_db, "Expiry Customer", "expiry-customer@example.com", "customer")
+    product_id = create_product(commerce_db, brand_id, name="Expiry Serum", slug="expiry-serum", sale_price=None, stock=6)
+    campaign = commerce_client.post("/api/v1/campaigns", headers=brand, json={
+        "title": "Expiry Campaign", "product_id": product_id, "reward_rate": "10", "budget": "500"})
+    assert campaign.status_code == 201
+    campaign_id = campaign.json()["id"]
+    assert commerce_client.patch(f"/api/v1/campaigns/{campaign_id}/status", headers=brand,
+        json={"status": "published"}).status_code == 200
+    application = commerce_client.post(f"/api/v1/campaigns/{campaign_id}/applications", headers=creator, json={})
+    assert application.status_code == 201
+    assert commerce_client.patch(f"/api/v1/applications/{application.json()['id']}", headers=brand,
+        json={"status": "accepted"}).status_code == 200
+    referral = commerce_client.post("/api/v1/referrals/links", headers=creator, json={"campaign_id": campaign_id})
+    assert referral.status_code == 201
+    code = referral.json()["code"]
+    assert commerce_client.get(f"/api/v1/r/{code}").status_code == 200
+    assert add_to_cart(commerce_client, customer, product_id).status_code == 201
+    first = commerce_client.post("/api/v1/checkout", headers={**customer, "Idempotency-Key": "expiry-historical-001"},
+        json={**address(), "payment_method": "demo"})
+    assert first.status_code == 201 and first.json()["conversion"]["status"] == "confirmed"
+    with commerce_db() as db:
+        visitor = db.scalar(select(VisitorAttribution))
+        visitor.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db.commit()
+    assert add_to_cart(commerce_client, customer, product_id).status_code == 201
+    expired_cookie_order = commerce_client.post("/api/v1/checkout", headers={**customer, "Idempotency-Key": "expiry-cookie-002"},
+        json={**address(), "payment_method": "cod"})
+    assert expired_cookie_order.status_code == 201 and expired_cookie_order.json()["referral"] is None
+
+    # A fresh eligible touch reopens the attribution window; ending the campaign
+    # then blocks future attribution without rewriting the already-created sale.
+    assert commerce_client.get(f"/api/v1/r/{code}").status_code == 200
+    with commerce_db() as db:
+        campaign_row = db.get(Campaign, campaign_id)
+        campaign_row.ends_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db.commit()
+    assert commerce_client.get(f"/api/v1/r/{code}").status_code == 410
+    assert commerce_client.post(f"/api/v1/campaigns/{campaign_id}/applications", headers=later_creator, json={}).status_code == 404
+    assert add_to_cart(commerce_client, customer, product_id).status_code == 201
+    expired_campaign_order = commerce_client.post("/api/v1/checkout", headers={**customer, "Idempotency-Key": "expiry-campaign-003"},
+        json={**address(), "payment_method": "cod"})
+    assert expired_campaign_order.status_code == 201 and expired_campaign_order.json()["referral"] is None
+    with commerce_db() as db:
+        orders = db.scalars(select(Order).where(Order.customer_id == customer_id).order_by(Order.id)).all()
+        conversions = db.scalars(select(Conversion).where(Conversion.order_id == orders[0].id)).all()
+        assert len(orders) == 3 and len(conversions) == 1
+        assert conversions[0].status == "confirmed" and conversions[0].creator_id == creator_id
+        assert db.scalar(select(func.count(Conversion.id))) == 1
+        rewards = db.scalars(select(Reward).where(Reward.order_id == orders[0].id)).all()
+        assert len(rewards) == 1 and rewards[0].is_demo
+        assert db.scalar(select(func.count(Reward.id))) == 1
+        line_items = [db.scalars(select(OrderItem).where(OrderItem.order_id == order.id)).one() for order in orders]
+        assert line_items[0].referral_id is not None and line_items[0].reward_snapshot is not None
+        assert line_items[1].referral_id is None and line_items[2].referral_id is None
+
+
+def test_creator_suspension_blocks_new_attribution_and_reactivation_preserves_history(commerce_db, commerce_client):
+    brand_id, brand = create_account(commerce_db, "Suspension Brand", "suspension-brand@example.com", "brand")
+    creator_id, creator = create_account(commerce_db, "Suspension Creator", "suspension-creator@example.com", "creator")
+    customer_id, customer = create_account(commerce_db, "Suspension Buyer", "suspension-buyer@example.com", "customer")
+    _admin_id, admin = create_account(commerce_db, "Suspension Admin", "suspension-admin@example.com", "admin")
+    product_id = create_product(commerce_db, brand_id, name="Suspension Product", slug="suspension-product", stock=6, sale_price=None)
+    campaign = commerce_client.post("/api/v1/campaigns", headers=brand, json={
+        "title": "Suspension Campaign", "product_id": product_id, "reward_rate": "10", "budget": "500"})
+    assert campaign.status_code == 201
+    campaign_id = campaign.json()["id"]
+    assert commerce_client.patch(f"/api/v1/campaigns/{campaign_id}/status", headers=brand,
+        json={"status": "published"}).status_code == 200
+    application = commerce_client.post(f"/api/v1/campaigns/{campaign_id}/applications", headers=creator, json={})
+    assert application.status_code == 201
+    assert commerce_client.patch(f"/api/v1/applications/{application.json()['id']}", headers=brand,
+        json={"status": "accepted"}).status_code == 200
+    link = commerce_client.post("/api/v1/referrals/links", headers=creator, json={"campaign_id": campaign_id})
+    assert link.status_code == 201
+    code = link.json()["code"]
+    assert commerce_client.get(f"/api/v1/r/{code}").status_code == 200
+    assert add_to_cart(commerce_client, customer, product_id).status_code == 201
+    historical = commerce_client.post("/api/v1/checkout", headers={**customer, "Idempotency-Key": "suspended-creator-old-order"},
+        json={**address(), "payment_method": "demo"})
+    assert historical.status_code == 201 and historical.json()["conversion"]["status"] == "confirmed"
+    assert historical.json()["referral"]["creator_name"] == "Suspension Creator"
+
+    suspended = commerce_client.post(f"/api/v1/admin/users/{creator_id}/lifecycle", headers=admin,
+        json={"active": False, "reason": "Pause creator while reviewing account", "confirmation": "SUSPEND"})
+    assert suspended.status_code == 200
+    assert commerce_client.get("/api/v1/auth/me", headers=creator).status_code == 401
+    assert commerce_client.get(f"/api/v1/r/{code}").status_code == 410
+    assert add_to_cart(commerce_client, customer, product_id).status_code == 201
+    new_order = commerce_client.post("/api/v1/checkout", headers={**customer, "Idempotency-Key": "suspended-creator-new-order"},
+        json={**address(), "payment_method": "cod"})
+    assert new_order.status_code == 201 and new_order.json()["referral"] is None
+    with commerce_db() as db:
+        old_order = db.scalar(select(Order).where(Order.public_id == historical.json()["id"]))
+        old_conversion = db.scalar(select(Conversion).where(Conversion.order_id == old_order.id))
+        old_reward = db.scalar(select(Reward).where(Reward.order_id == old_order.id))
+        new_order_row = db.scalar(select(Order).where(Order.public_id == new_order.json()["id"]))
+        assert old_conversion.status == "confirmed" and old_conversion.creator_id == creator_id
+        assert old_reward and old_reward.is_demo and old_reward.status == "simulated"
+        assert db.scalar(select(Conversion.id).where(Conversion.order_id == new_order_row.id)) is None
+        assert db.scalar(select(Reward.id).where(Reward.order_id == new_order_row.id)) is None
+
+    reactivated = commerce_client.post(f"/api/v1/admin/users/{creator_id}/lifecycle", headers=admin,
+        json={"active": True, "reason": "Account review completed", "confirmation": "REACTIVATE"})
+    assert reactivated.status_code == 200
+    assert commerce_client.get("/api/v1/auth/me", headers=creator).status_code == 401, "suspension must revoke existing sessions permanently"
+    login = commerce_client.post("/api/v1/auth/login", json={"email": "suspension-creator@example.com", "password": "commerce-testing-password"})
+    assert login.status_code == 200
+    reauthenticated_creator = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    assert commerce_client.get("/api/v1/auth/me", headers=reauthenticated_creator).status_code == 200
+    creator_history = commerce_client.get("/api/v1/creator/conversions", headers=reauthenticated_creator)
+    assert creator_history.status_code == 200 and creator_history.json()["total"] == 1
+    assert creator_history.json()["items"][0]["attributed_amount"] == "100.00"
+    assert commerce_client.get(f"/api/v1/r/{code}").status_code == 200
+    notices = commerce_client.get("/api/v1/notifications", headers=reauthenticated_creator)
+    assert notices.status_code == 200
+    lifecycle_notices = [item for item in notices.json()["items"] if item["title"] == "Account access updated"]
+    assert len(lifecycle_notices) == 2
+    with commerce_db() as db:
+        referral = db.scalar(select(Referral).where(Referral.code == code))
+        old_order = db.scalar(select(Order).where(Order.public_id == historical.json()["id"]))
+        assert referral.active is True
+        assert db.scalar(select(Conversion.id).where(Conversion.order_id == old_order.id)) is not None
+        assert db.scalar(select(func.count(Conversion.id))) == 1
+
+
+def test_tampered_reward_snapshot_is_flagged_and_not_credited(commerce_db, commerce_client):
+    brand_id, brand = create_account(commerce_db, "Snapshot Brand", "snapshot-brand@example.com", "brand")
+    customer_id, customer = create_account(commerce_db, "Snapshot Buyer", "snapshot-buyer@example.com", "customer")
+    creator_id, creator = create_account(commerce_db, "Snapshot Creator", "snapshot-creator@example.com", "creator")
+    _admin_id, admin = create_account(commerce_db, "Snapshot Admin", "snapshot-admin@example.com", "admin")
+    product_id = create_product(commerce_db, brand_id, name="Snapshot Integrity", slug="snapshot-integrity", stock=3, sale_price=None)
+    with commerce_db() as db:
+        campaign = Campaign(brand_id=brand_id, product_id=product_id, title="Snapshot Integrity Campaign",
+            slug="snapshot-integrity-campaign", description="", category="Beauty", platforms="Instagram",
+            reward_model="percentage", reward_rate=Decimal("10"), budget=Decimal("500"), status="published")
+        db.add(campaign)
+        db.flush()
+        db.add_all([Application(campaign_id=campaign.id, creator_id=creator_id, status="accepted"),
+                    Referral(campaign_id=campaign.id, creator_id=creator_id, code="SNAPSHOTOK", active=True)])
+        db.commit()
+    assert commerce_client.get("/api/v1/r/SNAPSHOTOK").status_code == 200
+    assert add_to_cart(commerce_client, customer, product_id).status_code == 201
+    order_payload = commerce_client.post("/api/v1/checkout", headers={**customer, "Idempotency-Key": "snapshot-tamper-order"},
+        json={**address(), "payment_method": "cod"})
+    assert order_payload.status_code == 201
+    with commerce_db() as db:
+        order = db.scalar(select(Order).where(Order.public_id == order_payload.json()["id"]))
+        item = db.scalar(select(OrderItem).where(OrderItem.order_id == order.id))
+        corrupted = dict(item.reward_snapshot)
+        corrupted["product_id"] = product_id + 10000
+        db.execute(update(OrderItem).where(OrderItem.id == item.id).values(reward_snapshot=corrupted))
+        db.commit()
+    for status in ("processing", "shipped", "delivered"):
+        assert commerce_client.patch(f"/api/v1/orders/{order_payload.json()['id']}/status", headers=admin,
+            json={"status": status}).status_code == 200
+    assert commerce_client.post(f"/api/v1/admin/orders/{order_payload.json()['id']}/collect-payment", headers=admin).status_code == 200
+    with commerce_db() as db:
+        order = db.scalar(select(Order).where(Order.public_id == order_payload.json()["id"]))
+        assert db.scalar(select(Reward.id).where(Reward.order_id == order.id)) is None
+        assert db.scalar(select(LedgerEntry.id).where(LedgerEntry.order_id == order.id)) is None
+        risk = db.scalar(select(ReferralRiskFlag).where(ReferralRiskFlag.risk_code == "ATTRIBUTION_SNAPSHOT_MISMATCH"))
+        assert risk and risk.status == "open" and risk.conversion_id == db.scalar(select(Conversion.id).where(Conversion.order_id == order.id))
+        assert order.payment_status == "paid"
