@@ -7,7 +7,7 @@ from sqlalchemy.pool import StaticPool
 from app.api.v1.auth import limiter
 from app.database import Base, get_db
 from app.main import app
-from app.models.entities import (AdminAuditEvent, AdminDisputeEvent, AuthSession, BrandProfile, Campaign,
+from app.models.entities import (AdminAuditEvent, AdminDispute, AdminDisputeEvent, AuthSession, BrandProfile, Campaign,
     CreatorProfile, LedgerEntry, Order, Product, ReferralRiskFlag, User)
 from app.security import create_access_token, hash_password
 from app.services.auth import create_session
@@ -102,6 +102,61 @@ def test_manual_verification_campaign_moderation_and_risk_review_are_audited(adm
         assert db.get(ReferralRiskFlag, flag_id).status == "dismissed"
         events = db.scalars(select(AdminAuditEvent).order_by(AdminAuditEvent.id)).all()
         assert len(events) == 3 and all(row.reason for row in events)
+
+
+def test_admin_product_moderation_is_paginated_audited_and_preserves_product_record(admin_client):
+    client,factory,account=admin_client
+    _,admin=account("admin","Product Moderator")
+    brand_id,_=account("brand","Moderated Seller")
+    with factory() as db:
+        product=Product(brand_id=brand_id,name="Moderated Item",slug="moderated-item",price=Decimal("25.00"),stock=5,status="active")
+        db.add(product);db.commit();product_id=product.id
+    assert client.get("/api/v1/admin/products").status_code==401
+    listed=client.get("/api/v1/admin/products",headers=admin,params={"q":"Moderated","page_size":1})
+    assert listed.status_code==200 and listed.json()["total"]==1
+    rejected=client.post(f"/api/v1/admin/products/{product_id}/moderation",headers=admin,json={"status":"inactive","reason":"Valid reason to suspend listing","confirmation":"WRONG"})
+    assert rejected.status_code==422
+    changed=client.post(f"/api/v1/admin/products/{product_id}/moderation",headers=admin,json={"status":"inactive","reason":"Valid reason to suspend listing","confirmation":"DEACTIVATE"})
+    assert changed.status_code==200 and changed.json()["status"]=="inactive"
+    with factory() as db:
+        assert db.get(Product,product_id) is not None and db.get(Product,product_id).status=="inactive"
+        event=db.query(AdminAuditEvent).filter_by(entity_type="product",entity_id=str(product_id)).one()
+        assert event.reason=="Valid reason to suspend listing"
+    assert client.post(f"/api/v1/admin/products/{product_id}/moderation",headers=admin,json={"status":"active","reason":"Restore reviewed product","confirmation":"ACTIVATE"}).status_code==200
+
+
+def test_customer_can_report_owned_order_and_admin_resolution_preserves_financial_state(admin_client):
+    client,factory,account=admin_client
+    _,admin=account("admin","Dispute Administrator")
+    customer_id,customer=account("customer","Dispute Customer")
+    _,other_customer=account("customer","Other Dispute Customer")
+    brand_id,_=account("brand","Dispute Seller")
+    with factory() as db:
+        product=Product(brand_id=brand_id,name="Dispute Product",slug="dispute-product",price=Decimal("80.00"),stock=2,status="active")
+        db.add(product);db.flush()
+        order=Order(public_id="ORDER-DISPUTE-1",customer_name="Dispute Customer",customer_email="disputecustomer@example.test",customer_id=customer_id,product_id=product.id,quantity=1,amount=Decimal("80.00"),payment_method="cod",payment_status="unpaid",status="delivered")
+        db.add(order);db.commit();order_id=order.id
+    denied=client.post("/api/v1/disputes",headers=other_customer,json={"order_id":"ORDER-DISPUTE-1","summary":"Order issue reported","reason":"I am not the customer for this order"})
+    assert denied.status_code==404
+    created=client.post("/api/v1/disputes",headers=customer,json={"order_id":"ORDER-DISPUTE-1","summary":"Package condition concern","reason":"The delivered package arrived with a damaged seal"})
+    assert created.status_code==201 and created.json()["financial_history_mutated"] is False
+    admin_inbox=client.get("/api/v1/notifications",headers=admin)
+    assert any(item["title"]=="A customer dispute was opened" for item in admin_inbox.json()["items"])
+    assert client.post("/api/v1/disputes",headers=customer,json={"order_id":"ORDER-DISPUTE-1","summary":"Another order concern","reason":"A duplicate open issue should be rejected"}).status_code==409
+    own_cases=client.get("/api/v1/disputes",headers=customer)
+    assert own_cases.status_code==200 and own_cases.json()["total"]==1
+    assert client.get("/api/v1/disputes",headers=other_customer).json()["total"]==0
+    case_id=created.json()["id"]
+    changed=client.post(f"/api/v1/admin/disputes/{case_id}/status",headers=admin,json={"status":"under_review","reason":"Reviewing order evidence with support","confirmation":"UNDER_REVIEW"})
+    assert changed.status_code==200
+    assert client.post(f"/api/v1/admin/disputes/{case_id}/status",headers=admin,json={"status":"resolved","reason":"Evidence review is now completed","confirmation":"RESOLVED"}).status_code==200
+    inbox=client.get("/api/v1/notifications",headers=customer)
+    assert inbox.status_code==200 and any(item["title"]=="Order issue status updated" for item in inbox.json()["items"])
+    with factory() as db:
+        order=db.get(Order,order_id)
+        case=db.get(AdminDispute,case_id)
+        assert order.amount==Decimal("80.00") and order.payment_status=="unpaid" and order.status=="delivered"
+        assert case.status=="resolved" and db.query(AdminDisputeEvent).filter_by(dispute_id=case_id).count()==3
 
 
 def test_disputes_preserve_ledger_and_admin_history_is_append_only(admin_client):

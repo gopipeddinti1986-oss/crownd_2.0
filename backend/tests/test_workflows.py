@@ -17,7 +17,7 @@ from app.core.config import Settings, settings
 from app.database import Base, get_db
 from app.main import app
 from app.models.entities import AuthActionToken, AuthSession, User
-from app.security import ALGORITHM, hash_password
+from app.security import ALGORITHM, create_access_token, hash_password
 from app.services.auth import create_session
 from app.services.rewards import calculate_reward
 
@@ -356,3 +356,106 @@ def test_concurrent_refresh_requests_cannot_both_rotate_the_same_secret(tmp_path
             assert db.get(AuthSession,session_id).revoked_at is not None
     finally:
         app.dependency_overrides.clear();limiter.reset();engine.dispose()
+
+
+def test_creator_profile_update_validates_fields_bounds_ownership_and_missing_records(client,emails,db_engine):
+    _,creator=verified_login(client,emails,"profile-update@test.example","creator","Profile Creator")
+    _,other_creator=verified_login(client,emails,"profile-other@test.example","creator","Other Creator")
+    _,brand=verified_login(client,emails,"profile-brand@test.example","brand","Profile Brand")
+    endpoint="/api/v1/creators/me"
+
+    assert client.put(endpoint,headers=creator,json={"followers":1234,"engagement":4.2,"bio":"A useful bio"}).json()["profile"]["followers"]==1234
+    listed=client.get("/api/v1/creators",headers=brand,params={"q":"Profile Creator"})
+    assert listed.status_code==200 and listed.json()[0]["bio"]=="A useful bio"
+    assert client.get("/api/v1/creators",headers=brand,params={"q":"Instagram"}).json()[0]["username"]=="profile-update"
+    assert client.get("/api/v1/creators",headers=brand,params={"q":"x"*121}).status_code==422
+    assert client.put(endpoint,headers=creator,json={"unknown":"value"}).status_code==422
+    assert client.put(endpoint,headers=creator,json={"followers":-1}).status_code==422
+    assert client.put(endpoint,headers=creator,json={"engagement":100.01}).status_code==422
+    assert client.put(endpoint,headers=creator,json={"username":"invalid name"}).status_code==422
+    assert client.put(endpoint,headers=creator,json={"followers":"not-a-number"}).status_code==422
+    assert client.put(endpoint,headers=creator,json={"name":None}).status_code==422
+    assert client.put(endpoint,headers=creator,json={}).status_code==422
+    assert client.put(endpoint,headers=brand,json={"bio":"not a creator"}).status_code==403
+    assert client.put(endpoint,headers=other_creator,json={"username":"profile-update"}).status_code==409
+
+    from sqlalchemy import select
+    from app.models.entities import CreatorProfile
+    with sessionmaker(bind=db_engine)() as db:
+        profile=db.scalar(select(CreatorProfile).where(CreatorProfile.username=="profile-update"))
+        assert profile is not None
+        db.delete(profile)
+        db.commit()
+    assert client.put(endpoint,headers=creator,json={"bio":"profile missing"}).status_code==404
+
+
+def test_role_aware_account_profile_updates_are_validated_and_audited(client,emails,db_engine):
+    _,creator=verified_login(client,emails,"account-profile-creator@test.example","creator","Creator Before")
+    _,brand=verified_login(client,emails,"account-profile-brand@test.example","brand","Brand Before")
+    _,customer=verified_login(client,emails,"account-profile-customer@test.example","customer","Customer Before")
+    with sessionmaker(bind=db_engine,autoflush=False,expire_on_commit=False)() as db:
+        admin_user=User(name="Admin Before",email="account-profile-admin@test.example",role="admin",password_hash=hash_password("admin-testing-password"),email_verified=True)
+        db.add(admin_user);db.flush();admin_session,_secret=create_session(db,admin_user);db.commit()
+        admin={"Authorization":"Bearer "+create_access_token(admin_user,admin_session.id)}
+
+    updated_creator=client.put("/api/v1/me/profile",headers=creator,json={"name":"Creator After","bio":"An updated creator bio","followers":3050})
+    assert updated_creator.status_code==200
+    assert updated_creator.json()["name"]=="Creator After" and updated_creator.json()["profile"]["followers"]==3050
+    assert client.put("/api/v1/me/profile",headers=creator,json={"industry":"Not allowed for creators"}).status_code==422
+    assert client.put("/api/v1/me/profile",headers=creator,json={"engagement":100.1}).status_code==422
+    assert client.put("/api/v1/me/profile",headers=creator,json={"unknown":"field"}).status_code==422
+    assert client.put("/api/v1/me/profile",headers=creator,json={"bio":None}).status_code==422
+
+    updated_brand=client.put("/api/v1/me/profile",headers=brand,json={"name":"New Brand Name","industry":"Food","website":"https://brand.example","description":"Updated profile"})
+    assert updated_brand.status_code==200 and updated_brand.json()["profile"]["industry"]=="Food"
+    assert client.put("/api/v1/me/profile",headers=brand,json={"website":"http://unsafe.example"}).status_code==422
+    assert client.put("/api/v1/me/profile",headers=brand,json={"website":"https://bad example.test"}).status_code==422
+    assert client.put("/api/v1/me/profile",headers=brand,json={"website":"https://user:pass@example.test"}).status_code==422
+    updated_customer=client.put("/api/v1/me/profile",headers=customer,json={"name":"Customer After"})
+    assert updated_customer.status_code==200 and updated_customer.json()["name"]=="Customer After"
+    assert client.put("/api/v1/me/profile",headers=customer,json={"bio":"Not editable"}).status_code==422
+    assert client.put("/api/v1/me/profile",headers=admin,json={"name":"Admin After"}).status_code==200
+    assert client.put("/api/v1/me/profile",headers=creator,json={}).status_code==422
+
+    from sqlalchemy import select,func
+    from app.models.entities import AuditLog
+    with sessionmaker(bind=db_engine)() as db:
+        assert db.scalar(select(func.count(AuditLog.id)).where(AuditLog.action=="account.profile_updated"))==4
+
+
+def test_application_payload_validation_owner_checks_and_idempotent_review(client,emails,db_engine):
+    _,brand=verified_login(client,emails,"application-brand@test.example","brand","Application Brand")
+    _,other_brand=verified_login(client,emails,"application-other-brand@test.example","brand","Other Brand")
+    _,creator=verified_login(client,emails,"application-creator@test.example","creator","Application Creator")
+    campaign=client.post("/api/v1/campaigns",headers=brand,json={"title":"Application schema campaign"}).json()
+    assert client.patch(f"/api/v1/campaigns/{campaign['id']}/status",headers=brand,json={"status":"published"}).status_code==200
+    apply_url=f"/api/v1/campaigns/{campaign['id']}/applications"
+    assert client.post(apply_url,headers=creator,json={"message":"x"*2001}).status_code==422
+    assert client.post(apply_url,headers=creator,json={"message":"ok","status":"accepted"}).status_code==422
+    submitted=client.post(apply_url,headers=creator,json={"message":"Please consider my work."})
+    assert submitted.status_code==201
+    assert client.post(apply_url,headers=creator,json={}).status_code==409
+
+    review_url=f"/api/v1/applications/{submitted.json()['id']}"
+    assert client.patch("/api/v1/applications/999999",headers=brand,json={"status":"accepted"}).status_code==404
+    assert client.patch(review_url,headers=creator,json={"status":"accepted"}).status_code==403
+    assert client.patch(review_url,headers=other_brand,json={"status":"accepted"}).status_code==403
+    assert client.patch(review_url,headers=brand,json={"status":"unknown"}).status_code==422
+    assert client.patch(review_url,headers=brand,json={"status":"accepted","reason":"extra"}).status_code==422
+
+    accepted=client.patch(review_url,headers=brand,json={"status":"accepted"})
+    assert accepted.status_code==200 and accepted.json()["status"]=="accepted"
+    from sqlalchemy import select,func
+    from app.models.entities import AuditLog,Notification,Referral,User
+    with sessionmaker(bind=db_engine)() as db:
+        creator_id=db.scalar(select(User.id).where(User.email=="application-creator@test.example"))
+        referral_count=db.scalar(select(func.count(Referral.id)).where(Referral.campaign_id==campaign["id"]))
+        notification_count=db.scalar(select(func.count(Notification.id)).where(Notification.recipient_id==creator_id))
+        audit_count=db.scalar(select(func.count(AuditLog.id)).where(AuditLog.entity_type=="application",AuditLog.entity_id==str(submitted.json()["id"])))
+    # A retried request for the current state is a no-op: it emits no second referral/audit/notice.
+    assert client.patch(review_url,headers=brand,json={"status":"accepted"}).status_code==200
+    assert client.patch(review_url,headers=brand,json={"status":"rejected"}).status_code==409
+    with sessionmaker(bind=db_engine)() as db:
+        assert db.scalar(select(func.count(Referral.id)).where(Referral.campaign_id==campaign["id"]))==referral_count==1
+        assert db.scalar(select(func.count(AuditLog.id)).where(AuditLog.entity_type=="application",AuditLog.entity_id==str(submitted.json()["id"])))==audit_count==1
+        assert db.scalar(select(func.count(Notification.id)).where(Notification.recipient_id==creator_id))==notification_count==2

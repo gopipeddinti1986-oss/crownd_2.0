@@ -14,6 +14,7 @@ beforeEach(()=>{vi.clearAllMocks();apiMock.get.mockImplementation(async(path:str
  if(path==='/admin/operations')return {data:{service:{api_liveness:'available',database_query:'available'},integrations:{email_delivery:'not_probed'},queues:{active_users:3,open_risk_flags:1,open_disputes:0,unverified_creators:1,unverified_brands:0,campaigns_needing_moderation:2},notifications:{delivery:'sql_outbox_available',provider:'disabled_or_incomplete',worker_status:'not_measured',pending:0}}};
  if(path==='/admin/users')return {data:{items:[{id:9,name:'Test Creator',email_masked:'t***@example.test',role:'creator',active:true,email_verified:true,verification:'unverified'}],total:1}};
  if(path==='/admin/campaigns')return {data:{items:[],total:0}};
+ if(path==='/admin/products')return {data:{items:[{id:12,name:'Sample Product',slug:'sample-product',brand_id:3,status:'active',stock:5,price:'50.00',created_at:'2026-01-01T00:00:00Z'}],total:1,page:1,pages:1}};
  if(path==='/admin/disputes')return {data:{items:[],total:0}};
  if(path==='/admin/audit-events')return {data:{items:[],total:0}};
  return {data:{}};
@@ -42,6 +43,17 @@ describe('Phase 7 platform administration UI',()=>{
   await user.click(screen.getByRole('button',{name:'Confirm action'}));
   await waitFor(()=>expect(apiMock.post).toHaveBeenCalledWith('/admin/users/9/lifecycle',{
    active:false,reason:'Temporary access restriction for manual review',confirmation:'SUSPEND'
+  }));
+ });
+ it('moderates product visibility with a reason and typed confirmation',async()=>{
+  const user=userEvent.setup();mount(<AdminOperations notify={notify}/>);
+  await user.click(await screen.findByRole('button',{name:'Products'}));
+  await user.click(await screen.findByRole('button',{name:'Deactivate listing'}));
+  await user.type(screen.getByPlaceholderText(/Explain the administrative decision/),'Product listing requires a policy review');
+  await user.type(screen.getByLabelText('Type confirmation phrase'),'DEACTIVATE');
+  await user.click(screen.getByRole('button',{name:'Confirm action'}));
+  await waitFor(()=>expect(apiMock.post).toHaveBeenCalledWith('/admin/products/12/moderation',{
+   status:'inactive',reason:'Product listing requires a policy review',confirmation:'DEACTIVATE'
   }));
  });
  it('shows unverified profiles as a manual review task',async()=>{

@@ -60,7 +60,7 @@ def _safe_text(value: str, limit: int) -> str:
 def _safe_path(path: str | None) -> str | None:
     if path is None:
         return None
-    allowed = {"/applications", "/earnings", "/brand/campaigns", "/settings/notifications"}
+    allowed = {"/applications", "/earnings", "/brand/campaigns", "/settings/notifications", "/admin/disputes"}
     if path not in allowed and not re.fullmatch(r"/orders/[A-Za-z0-9-]{1,80}", path):
         raise ValueError("Notification action must be a supported internal route")
     return path

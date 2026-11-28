@@ -97,6 +97,16 @@ describe('customer commerce experience',()=>{
     await ui.click(screen.getByRole('button',{name:'Cancel order'}));
     await waitFor(()=>expect(mocks.cancelOrder).toHaveBeenCalledWith('CR-ORDER123456'));
   });
+  it('submits an order issue to the dispute API with customer-entered details',async()=>{
+    const ui=userEvent.setup();mountAt(<OrderDetailPage user={user} notify={notify}/ >,'/orders/CR-ORDER123456');
+    expect(await screen.findByRole('heading',{name:'Your order.'})).toBeTruthy();
+    await ui.click(screen.getByRole('button',{name:'Report an order issue'}));
+    await ui.type(screen.getByLabelText('Issue summary'),'Package arrived damaged');
+    await ui.type(screen.getByLabelText('Details'),'The outside package was crushed when it arrived');
+    await ui.click(screen.getByRole('button',{name:'Submit for review'}));
+    await waitFor(()=>expect(mocks.apiPost).toHaveBeenCalledWith('/disputes',{order_id:'CR-ORDER123456',summary:'Package arrived damaged',reason:'The outside package was crushed when it arrived'}));
+    expect(notify).toHaveBeenCalledWith('Order issue submitted for administrator review. Financial records were not changed.');
+  });
   it('shows admin payment details and transaction references in order management',async()=>{
     const ui=userEvent.setup();mountAt(<AdminOrdersPage notify={notify}/ >,'/admin/orders');
     expect(await screen.findByRole('button',{name:'CR-ORDER123456'})).toBeTruthy();

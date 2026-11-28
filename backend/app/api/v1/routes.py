@@ -19,6 +19,7 @@ from app.api.v1.auth import router as auth_router
 from app.api.v1.commerce import router as commerce_router
 from app.api.v1.rewards import router as rewards_router
 from app.schemas.commerce import CampaignCreate, CampaignProductsUpdate, CampaignStatusUpdate, ProductCreate, ReferralLinkCreate, ReferralLinkUpdate, ReferralRiskReview
+from app.schemas.workflows import AccountProfileUpdate, ApplicationReview, ApplicationSubmission, CreatorProfileUpdate
 from app.api.v1.campaigns import router as campaigns_router
 from app.api.v1.analytics import router as analytics_router
 from app.api.v1.admin import router as admin_router
@@ -56,20 +57,72 @@ def health_readiness(db: Session = Depends(get_db)):
     return {"status": "ready", "dependencies": {"database": "ok"}}
 
 @router.get("/creators")
-def creators(q:str|None=None,niche:str|None=None,platform:str|None=None,limit:int=Query(30,ge=1,le=100),offset:int=0,db:Session=Depends(get_db),user:User=Depends(current_user)):
+def creators(q:str|None=Query(default=None,max_length=120),niche:str|None=Query(default=None,max_length=80),platform:str|None=Query(default=None,max_length=40),limit:int=Query(30,ge=1,le=100),offset:int=Query(0,ge=0),db:Session=Depends(get_db),user:User=Depends(current_user)):
     stmt=select(CreatorProfile,User).join(User,User.id==CreatorProfile.user_id).where(User.is_active==True)
-    if q: stmt=stmt.where((CreatorProfile.username.ilike(f"%{q}%"))|(User.name.ilike(f"%{q}%"))|(CreatorProfile.niche.ilike(f"%{q}%")))
+    if q: stmt=stmt.where((CreatorProfile.username.ilike(f"%{q}%"))|(User.name.ilike(f"%{q}%"))|(CreatorProfile.niche.ilike(f"%{q}%"))|(CreatorProfile.platform.ilike(f"%{q}%")))
     if niche: stmt=stmt.where(CreatorProfile.niche.ilike(f"%{niche}%"))
     if platform: stmt=stmt.where(CreatorProfile.platform.ilike(platform))
     profiles=db.execute(stmt.offset(offset).limit(limit)).all()
-    return [{"user_id":u.id,"name":u.name,"username":p.username,"niche":p.niche,"location":p.location,"platform":p.platform,"followers":p.followers,"engagement":p.engagement,"crown_score":p.crown_score,"trust_score":p.trust_score,"availability":p.availability} for p,u in profiles]
+    return [{"user_id":u.id,"name":u.name,"username":p.username,"niche":p.niche,"location":p.location,"bio":p.bio,"platform":p.platform,"followers":p.followers,"engagement":p.engagement,"crown_score":p.crown_score,"trust_score":p.trust_score,"availability":p.availability} for p,u in profiles]
 @router.put("/creators/me")
-def update_creator(body:dict,db:Session=Depends(get_db),user:User=Depends(require_role("creator"))):
+def update_creator(body:CreatorProfileUpdate,db:Session=Depends(get_db),user:User=Depends(require_role("creator"))):
     p=db.scalar(select(CreatorProfile).where(CreatorProfile.user_id==user.id))
-    for k in ("username","niche","location","bio","platform","followers","engagement","availability"):
-        if k in body: setattr(p,k,body[k])
-    if "name" in body: user.name=body["name"]
-    db.commit(); return {"ok":True}
+    if not p: raise HTTPException(404,"Creator profile not found")
+    values=body.model_dump(exclude_unset=True)
+    if "username" in values and db.scalar(select(CreatorProfile.id).where(CreatorProfile.username==values["username"],CreatorProfile.user_id!=user.id)):
+        raise HTTPException(409,"That creator username is already in use")
+    for field,value in values.items():
+        if field=="name": user.name=value
+        else: setattr(p,field,value)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409,"Creator profile update conflicts with an existing value") from None
+    return {"ok":True,"profile":{"name":user.name,"username":p.username,"niche":p.niche,"location":p.location,"bio":p.bio,"platform":p.platform,"followers":p.followers,"engagement":p.engagement,"availability":p.availability}}
+
+@router.put("/me/profile")
+def update_account_profile(body: AccountProfileUpdate, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    values = body.model_dump(exclude_unset=True)
+    role_fields = {
+        "creator": {"name", "username", "niche", "location", "bio", "platform", "followers", "engagement", "availability"},
+        "brand": {"name", "industry", "website", "description"},
+        "customer": {"name"},
+        "admin": {"name"},
+    }
+    allowed = role_fields.get(user.role, set())
+    if set(values) - allowed:
+        raise HTTPException(422, "One or more fields are not editable for this account role")
+    if "name" in values:
+        user.name = values["name"]
+    profile = None
+    if user.role == "creator":
+        profile = db.scalar(select(CreatorProfile).where(CreatorProfile.user_id == user.id))
+        if not profile:
+            raise HTTPException(404, "Creator profile not found")
+        if "username" in values and db.scalar(select(CreatorProfile.id).where(CreatorProfile.username == values["username"], CreatorProfile.user_id != user.id)):
+            raise HTTPException(409, "That creator username is already in use")
+    elif user.role == "brand":
+        profile = db.scalar(select(BrandProfile).where(BrandProfile.user_id == user.id))
+        if not profile:
+            raise HTTPException(404, "Brand profile not found")
+        if "name" in values:
+            profile.name = values["name"]
+    if profile:
+        for field, value in values.items():
+            if field != "name":
+                setattr(profile, field, value)
+    db.add(AuditLog(actor_id=user.id, action="account.profile_updated", entity_type="user", entity_id=str(user.id)))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "Profile update conflicts with an existing value") from None
+    result = {"id": user.id, "name": user.name, "email": user.email, "role": user.role, "email_verified": user.email_verified}
+    result["profile"] = ({field: getattr(profile, field) for field in ("username", "niche", "location", "bio", "platform", "followers", "engagement", "availability", "verification")} if user.role == "creator" else
+                         {field: getattr(profile, field) for field in ("name", "industry", "website", "description", "verification")} if user.role == "brand" else None)
+    return result
+
 
 @router.get("/campaigns")
 def campaigns(q:str|None=None,status:str="published",limit:int=Query(30,ge=1,le=100),offset:int=Query(0,ge=0),db:Session=Depends(get_db)):
@@ -120,13 +173,18 @@ def change_campaign(campaign_id:int,body:CampaignStatusUpdate,db:Session=Depends
     c.status=target; audit(db,user,"campaign.status_changed","campaign",c.id); db.commit(); return {"id":c.id,"status":c.status}
 
 @router.post("/campaigns/{campaign_id}/applications",status_code=201)
-def apply(campaign_id:int,body:dict,db:Session=Depends(get_db),user:User=Depends(require_role("creator"))):
+def apply(campaign_id:int,body:ApplicationSubmission,db:Session=Depends(get_db),user:User=Depends(require_role("creator"))):
     c=db.get(Campaign,campaign_id)
     brand=db.get(User,c.brand_id) if c else None
     if not c or c.visibility!="public" or not brand or brand.role!="brand" or not brand.is_active or not campaign_is_active(c): raise HTTPException(404,"Campaign is not accepting applications")
     existing=db.scalar(select(Application).where(Application.campaign_id==campaign_id,Application.creator_id==user.id))
     if existing: raise HTTPException(409,"You have already applied to this campaign")
-    a=Application(campaign_id=campaign_id,creator_id=user.id,message=body.get("message","")); db.add(a); db.flush()
+    a=Application(campaign_id=campaign_id,creator_id=user.id,message=body.message); db.add(a)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409,"You have already applied to this campaign") from None
     notice="A creator submitted an application to your campaign. Review the application in your workspace."
     create_notification(db,recipient_id=c.brand_id,event_key=f"application-submitted:{a.id}",category="application",
         title="Campaign application received",body=notice,action_path="/applications",
@@ -140,13 +198,17 @@ def applications(db:Session=Depends(get_db),user:User=Depends(current_user)):
     elif user.role!="admin": raise HTTPException(403,"Forbidden")
     return [{"id":a.id,"campaign_id":c.id,"campaign":c.title,"creator_id":u.id,"creator":u.name,"message":a.message,"status":a.status,"created_at":a.created_at.isoformat()} for a,c,u in db.execute(stmt.order_by(Application.created_at.desc())).all()]
 @router.patch("/applications/{application_id}")
-def review_application(application_id:int,body:dict,db:Session=Depends(get_db),user:User=Depends(current_user)):
-    a=db.get(Application,application_id)
+def review_application(application_id:int,body:ApplicationReview,db:Session=Depends(get_db),user:User=Depends(current_user)):
+    a=db.scalar(select(Application).where(Application.id==application_id).with_for_update())
     if not a: raise HTTPException(404,"Application not found")
     c=db.get(Campaign,a.campaign_id)
     if user.role!="admin" and (user.role!="brand" or c.brand_id!=user.id): raise HTTPException(403,"Forbidden")
-    status=body.get("status")
-    if status not in ("shortlisted","accepted","rejected"): raise HTTPException(422,"Invalid application status")
+    status=body.status
+    if status==a.status:
+        return {"id":a.id,"status":a.status}
+    transitions={"pending":{"shortlisted","accepted","rejected"},"shortlisted":{"accepted","rejected"}}
+    if status not in transitions.get(a.status,set()):
+        raise HTTPException(409,f"Application cannot transition from {a.status} to {status}")
     previous_status=a.status
     a.status=status
     if status=="accepted" and campaign_is_active(c) and not db.scalar(select(Referral.id).where(Referral.campaign_id==c.id,Referral.creator_id==a.creator_id)):

@@ -74,6 +74,50 @@ def add_to_cart(client, headers, product_id, quantity=1):
     return client.post("/api/v1/cart/items", headers=headers, json={"product_id": product_id, "quantity": quantity})
 
 
+def test_brand_product_catalog_is_owner_scoped_and_paginated(commerce_db,commerce_client):
+    brand_a,headers_a=create_account(commerce_db,"Owner A","owner-a@example.com","brand")
+    brand_b,headers_b=create_account(commerce_db,"Owner B","owner-b@example.com","brand")
+    _,admin_headers=create_account(commerce_db,"Catalog Admin","catalog-admin@example.com","admin")
+    first=create_product(commerce_db,brand_a,name="Owner A Item",slug="owner-a-item")
+    second=create_product(commerce_db,brand_a,name="Owner A Second",slug="owner-a-second")
+    create_product(commerce_db,brand_b,name="Owner B Item",slug="owner-b-item")
+
+    response=commerce_client.get("/api/v1/brand/products",headers=headers_a,params={"page":1,"page_size":1})
+    assert response.status_code==200
+    assert response.json()["total"]==2 and response.json()["pages"]==2
+    assert response.json()["items"][0]["id"] in {first,second}
+    assert all(item["brand"]["id"]==brand_a for item in response.json()["items"])
+    assert {item["name"] for item in commerce_client.get("/api/v1/brand/products",headers=headers_b).json()["items"]}=={"Owner B Item"}
+    assert commerce_client.get("/api/v1/brand/products",headers=admin_headers).status_code==403
+    assert commerce_client.get("/api/v1/brand/products",headers=headers_a,params={"page_size":101}).status_code==422
+
+
+def test_brand_can_update_and_deactivate_only_owned_products_without_deleting_history(commerce_db,commerce_client):
+    brand_a,headers_a=create_account(commerce_db,"Catalog Owner","catalog-owner@example.com","brand")
+    _,headers_b=create_account(commerce_db,"Other Owner","other-owner@example.com","brand")
+    product_id=create_product(commerce_db,brand_a,name="Editable Item",slug="editable-item")
+
+    updated=commerce_client.patch(f"/api/v1/brand/products/{product_id}",headers=headers_a,json={"stock":17,"name":"Updated Item","price":"125.50","sale_price":"99.00"})
+    assert updated.status_code==200 and updated.json()["name"]=="Updated Item"
+    assert updated.json()["stock"]==17 and updated.json()["sale_price"]=="99.00"
+    assert commerce_client.patch(f"/api/v1/brand/products/{product_id}",headers=headers_a,json={"price":"90.00"}).status_code==422
+    assert commerce_client.patch(f"/api/v1/brand/products/{product_id}",headers=headers_a,json={"unknown":"field"}).status_code==422
+    assert commerce_client.patch(f"/api/v1/brand/products/{product_id}",headers=headers_a,json={}).status_code==422
+    assert commerce_client.patch(f"/api/v1/brand/products/{product_id}",headers=headers_b,json={"stock":1}).status_code==404
+    assert commerce_client.patch(f"/api/v1/brand/products/{product_id}/status",headers=headers_b,json={"status":"inactive"}).status_code==404
+
+    campaign=commerce_client.post("/api/v1/campaigns",headers=headers_a,json={"title":"Product linked campaign","product_ids":[product_id]}).json()
+    assert commerce_client.patch(f"/api/v1/campaigns/{campaign['id']}/status",headers=headers_a,json={"status":"published"}).status_code==200
+    assert commerce_client.patch(f"/api/v1/brand/products/{product_id}/status",headers=headers_a,json={"status":"inactive"}).status_code==409
+    assert commerce_client.patch(f"/api/v1/campaigns/{campaign['id']}/status",headers=headers_a,json={"status":"paused"}).status_code==200
+    deactivated=commerce_client.patch(f"/api/v1/brand/products/{product_id}/status",headers=headers_a,json={"status":"inactive"})
+    assert deactivated.status_code==200 and deactivated.json()["status"]=="inactive"
+    assert all(item["id"]!=product_id for item in commerce_client.get("/api/v1/products").json()["items"])
+    with commerce_db() as db:
+        assert db.get(Product,product_id) is not None
+    assert commerce_client.patch(f"/api/v1/brand/products/{product_id}/status",headers=headers_a,json={"status":"active"}).status_code==200
+
+
 def test_discovery_search_filters_sort_pagination_and_details(commerce_db, commerce_client):
     brand, _ = create_account(commerce_db, "Noya Botanics", "brand1@example.com", "brand")
     other_brand, _ = create_account(commerce_db, "Morrow Pantry", "brand2@example.com", "brand")

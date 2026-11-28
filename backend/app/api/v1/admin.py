@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.core.config import settings
 from app.models.entities import (AdminAuditEvent, AdminDispute, AdminDisputeEvent, AuthSession, EmailDelivery,
-    BrandProfile, Campaign, Conversion, CreatorProfile, Order, ReferralRiskFlag, Reward, User)
+    BrandProfile, Campaign, CampaignProduct, Conversion, CreatorProfile, Order, OrderItem, Product, Referral, ReferralRiskFlag, Reward, User)
 from app.security import require_role
 from app.api.v1.auth import limiter
 from app.services.auth import revoke_sessions
@@ -44,6 +44,12 @@ class ModerationAction(BaseModel):
     reason: str = Field(min_length=10, max_length=500)
     confirmation: str = Field(min_length=4, max_length=20)
 
+class ProductModerationAction(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    status: str = Field(pattern="^(active|inactive)$")
+    reason: str = Field(min_length=10, max_length=500)
+    confirmation: str = Field(min_length=8, max_length=20)
+
 class RiskAction(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
     status: str = Field(pattern="^(reviewed|dismissed)$")
@@ -55,6 +61,12 @@ class DisputeCreate(BaseModel):
     order_id: int | None = Field(default=None, gt=0)
     conversion_id: int | None = Field(default=None, gt=0)
     reward_id: int | None = Field(default=None, gt=0)
+    reason: str = Field(min_length=10, max_length=500)
+
+class UserDisputeCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    order_id: str = Field(min_length=6, max_length=40)
+    summary: str = Field(min_length=10, max_length=500)
     reason: str = Field(min_length=10, max_length=500)
 
 class DisputeAction(BaseModel):
@@ -207,6 +219,86 @@ def moderate_campaign(campaign_id: int, body: ModerationAction, request: Request
     return {"id": campaign.id, "from_status": previous, "status": campaign.status}
 
 
+@router.get("/admin/products")
+@limiter.limit("60/minute")
+def list_products(request: Request, response: Response, q: str | None = Query(None, max_length=120), status: str = Query("all", pattern="^(active|inactive|all)$"), page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
+    stmt = select(Product)
+    if status != "all": stmt = stmt.where(Product.status == status)
+    if q:
+        term = f"%{q.strip()}%"
+        stmt = stmt.where(or_(Product.name.ilike(term), Product.slug.ilike(term)))
+    total = int(db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
+    rows = db.scalars(stmt.order_by(Product.created_at.desc(), Product.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
+    return {"items": [{"id": row.id, "brand_id": row.brand_id, "name": row.name, "slug": row.slug, "status": row.status, "stock": row.stock, "price": str(row.price), "created_at": row.created_at.isoformat()} for row in rows], "total": total, "page": page, "page_size": page_size, "pages": (total + page_size - 1) // page_size}
+
+
+@router.post("/admin/products/{product_id}/moderation")
+@limiter.limit("10/minute")
+def moderate_product(product_id: int, body: ProductModerationAction, request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
+    product = db.scalar(select(Product).where(Product.id == product_id).with_for_update())
+    if not product: raise HTTPException(404, "Product not found")
+    expected = "ACTIVATE" if body.status == "active" else "DEACTIVATE"
+    if body.confirmation != expected: raise HTTPException(422, f"Type {expected} to confirm this moderation action")
+    if product.status == body.status: raise HTTPException(409, "Product already has the requested status")
+    if body.status == "inactive":
+        linked = db.scalar(select(Campaign.id).outerjoin(CampaignProduct, CampaignProduct.campaign_id == Campaign.id).where(
+            Campaign.status == "published", or_(Campaign.product_id == product.id, CampaignProduct.product_id == product.id)
+        ).limit(1))
+        if linked: raise HTTPException(409, "Pause or complete linked published campaigns before deactivating this product")
+    previous = product.status
+    product.status = body.status
+    audit(db, user, f"product.moderation.{body.status}", "product", product.id, body.reason,
+          {"brand_id": product.brand_id, "from_status": previous, "to_status": body.status})
+    db.commit()
+    return {"id": product.id, "from_status": previous, "status": product.status}
+
+
+@router.get("/disputes")
+@limiter.limit("60/minute")
+def list_user_disputes(request: Request, response: Response, page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), db: Session = Depends(get_db), user: User = Depends(require_role("customer", "creator", "brand"))):
+    stmt = select(AdminDispute).where(AdminDispute.opened_by == user.id)
+    total = int(db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
+    cases = db.scalars(stmt.order_by(AdminDispute.created_at.desc(), AdminDispute.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
+    return {"items": [{"id": case.id, "order_id": db.get(Order, case.order_id).public_id if case.order_id and db.get(Order, case.order_id) else None,
+        "summary": case.summary, "status": case.status, "created_at": case.created_at.isoformat(),
+        "events": [{"event_type": event.event_type, "from_status": event.from_status, "to_status": event.to_status,
+                    "reason": event.reason, "created_at": event.created_at.isoformat()} for event in db.scalars(select(AdminDisputeEvent).where(AdminDisputeEvent.dispute_id == case.id).order_by(AdminDisputeEvent.id)).all()]}
+        for case in cases], "total": total, "page": page, "page_size": page_size, "pages": (total + page_size - 1) // page_size}
+
+
+@router.post("/disputes", status_code=201)
+@limiter.limit("5/hour")
+def open_user_dispute(body: UserDisputeCreate, request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(require_role("customer", "creator", "brand"))):
+    order = db.scalar(select(Order).where(Order.public_id == body.order_id).with_for_update())
+    if not order:
+        raise HTTPException(404, "Order not found")
+    owns = order.customer_id == user.id or (user.role == "customer" and order.customer_email.lower() == user.email.lower())
+    if user.role == "brand":
+        product_ids = set(db.scalars(select(OrderItem.product_id).where(OrderItem.order_id == order.id, OrderItem.product_id.is_not(None))).all())
+        if order.product_id:
+            product_ids.add(order.product_id)
+        owns = bool(product_ids and db.scalar(select(Product.id).where(Product.id.in_(product_ids), Product.brand_id == user.id).limit(1)))
+    elif user.role == "creator" and order.referral_id:
+        referral = db.get(Referral, order.referral_id)
+        owns = owns or bool(referral and referral.creator_id == user.id)
+    if not owns:
+        raise HTTPException(404, "Order not found")
+    existing = db.scalar(select(AdminDispute).where(AdminDispute.order_id == order.id, AdminDispute.opened_by == user.id,
+        AdminDispute.status.in_(["open", "under_review"])).with_for_update())
+    if existing:
+        raise HTTPException(409, f"An open dispute already exists for this order (case {existing.id})")
+    case = AdminDispute(order_id=order.id, status="open", summary=body.summary, opened_by=user.id, created_at=now())
+    db.add(case); db.flush()
+    db.add(AdminDisputeEvent(dispute_id=case.id, actor_id=user.id, event_type="opened", from_status=None, to_status="open", reason=body.reason, created_at=now()))
+    audit(db, user, "dispute.opened_by_user", "dispute", case.id, body.reason, {"order_id": order.id, "reporter_role": user.role})
+    for administrator in db.scalars(select(User).where(User.role == "admin", User.is_active.is_(True))).all():
+        create_notification(db, recipient_id=administrator.id, event_key=f"dispute-user-opened:{case.id}:{administrator.id}", category="order",
+            title="A customer dispute was opened", body="A platform participant submitted an order dispute for administrator review.",
+            action_path="/admin/disputes")
+    db.commit()
+    return {"id": case.id, "order_id": order.public_id, "status": case.status, "financial_history_mutated": False}
+
+
 @router.get("/admin/disputes")
 @limiter.limit("60/minute")
 def list_disputes(request: Request, response: Response, status: str = Query("open", pattern="^(open|under_review|resolved|all)$"), page: int = Query(1, ge=1),
@@ -253,6 +345,11 @@ def update_dispute(dispute_id: int, body: DisputeAction, request: Request, respo
     db.add(AdminDisputeEvent(dispute_id=case.id, actor_id=user.id, event_type="status_changed", from_status=previous,
         to_status=body.status, reason=body.reason, created_at=now()))
     audit(db, user, f"dispute.{body.status}", "dispute", case.id, body.reason, {"from_status": previous, "to_status": body.status})
+    if case.opened_by and case.opened_by != user.id:
+        order = db.get(Order, case.order_id) if case.order_id else None
+        create_notification(db, recipient_id=case.opened_by, event_key=f"dispute-status:{case.id}:{body.status}:{uuid4().hex}", category="order",
+            title="Order issue status updated", body=f"Your dispute case is now {body.status.replace('_', ' ')}. The decision did not alter financial records.",
+            action_path=f"/orders/{order.public_id}" if order else None)
     db.commit()
     return {"id": case.id, "status": case.status, "financial_history_mutated": False}
 

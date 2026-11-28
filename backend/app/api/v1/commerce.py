@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 from app.api.v1.auth import limiter
 from app.core.config import settings
 from app.database import get_db
-from app.models.entities import AuditLog, BrandProfile, Campaign, Cart, CartItem, Conversion, Order, OrderItem, PaymentAttempt, Product, Referral, ReferralActivity, User
-from app.schemas.commerce import CartItemRequest, CartQuantityRequest, CheckoutRequest, OrderStatusUpdate
+from app.models.entities import AuditLog, BrandProfile, Campaign, CampaignProduct, Cart, CartItem, Conversion, Order, OrderItem, PaymentAttempt, Product, Referral, ReferralActivity, User
+from app.schemas.commerce import CartItemRequest, CartQuantityRequest, CheckoutRequest, ProductCreate, ProductUpdate, ProductStatusUpdate, OrderStatusUpdate
 from app.security import current_user, require_role
 from app.services.payments import process_demo_payment
 from app.services.referrals import attribution_state, campaign_is_active, eligible_product_ids, referral_eligibility, signed_referral_from_request, track_activity, visitor_hash
@@ -168,6 +168,57 @@ def product_categories(db: Session = Depends(get_db)):
 def product_brands(db: Session = Depends(get_db)):
     rows = db.execute(select(User.id, func.coalesce(BrandProfile.name, User.name)).join(Product, Product.brand_id == User.id).outerjoin(BrandProfile, BrandProfile.user_id == User.id).where(Product.status == "active", User.role == "brand", User.is_active.is_(True)).distinct().order_by(func.coalesce(BrandProfile.name, User.name))).all()
     return [{"id": user_id, "name": name} for user_id, name in rows]
+
+
+@router.get("/brand/products")
+def brand_product_catalog(page: int = Query(default=1, ge=1), page_size: int = Query(default=25, ge=1, le=100), db: Session = Depends(get_db), user: User = Depends(require_role("brand"))):
+    stmt = select(Product).where(Product.brand_id == user.id)
+    total = int(db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
+    products = db.scalars(stmt.order_by(Product.created_at.desc(), Product.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
+    return {"items": [_product_payload(db, product) for product in products], "total": total, "page": page, "page_size": page_size, "pages": (total + page_size - 1) // page_size}
+
+
+@router.patch("/brand/products/{product_id}")
+def update_brand_product(product_id: int, body: ProductUpdate, db: Session = Depends(get_db), user: User = Depends(require_role("brand"))):
+    product = db.scalar(select(Product).where(Product.id == product_id, Product.brand_id == user.id).with_for_update())
+    if not product:
+        raise HTTPException(404, "Product not found")
+    values = body.model_dump(exclude_unset=True)
+    next_price = values.get("price", product.price)
+    next_sale_price = values.get("sale_price", product.sale_price)
+    if next_sale_price is not None and next_sale_price >= next_price:
+        raise HTTPException(422, "Sale price must be below regular price")
+    for field, value in values.items():
+        setattr(product, field, value)
+    try:
+        db.add(AuditLog(actor_id=user.id, action="product.updated", entity_type="product", entity_id=str(product.id)))
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "Product update conflicts with existing catalog data") from None
+    db.refresh(product)
+    return _product_payload(db, product)
+
+
+@router.patch("/brand/products/{product_id}/status")
+def update_brand_product_status(product_id: int, body: ProductStatusUpdate, db: Session = Depends(get_db), user: User = Depends(require_role("brand"))):
+    product = db.scalar(select(Product).where(Product.id == product_id, Product.brand_id == user.id).with_for_update())
+    if not product:
+        raise HTTPException(404, "Product not found")
+    if body.status == product.status:
+        return {"id": product.id, "status": product.status}
+    if body.status == "inactive":
+        linked_campaign = db.scalar(select(Campaign.id).outerjoin(CampaignProduct, CampaignProduct.campaign_id == Campaign.id).where(
+            Campaign.brand_id == user.id,
+            Campaign.status == "published",
+            or_(Campaign.product_id == product.id, CampaignProduct.product_id == product.id),
+        ).limit(1))
+        if linked_campaign:
+            raise HTTPException(409, "Pause or complete linked published campaigns before deactivating this product")
+    product.status = body.status
+    db.add(AuditLog(actor_id=user.id, action=f"product.{body.status}", entity_type="product", entity_id=str(product.id)))
+    db.commit()
+    return {"id": product.id, "status": product.status}
 
 
 @router.get("/products")

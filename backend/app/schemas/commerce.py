@@ -2,7 +2,7 @@ from decimal import Decimal
 from datetime import datetime
 from typing import Literal
 import re
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 class CartItemRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -62,6 +62,31 @@ class ProductCreate(BaseModel):
         if value is not None and price is not None and value >= price:
             raise ValueError("Sale price must be lower than the regular price")
         return value
+
+class ProductUpdate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    name: str | None = Field(default=None, min_length=2, max_length=160)
+    price: Decimal | None = Field(default=None, gt=0, max_digits=12, decimal_places=2)
+    sale_price: Decimal | None = Field(default=None, gt=0, max_digits=12, decimal_places=2)
+    description: str | None = Field(default=None, max_length=10000)
+    category: str | None = Field(default=None, min_length=2, max_length=80)
+    stock: int | None = Field(default=None, ge=0, le=1000000)
+    image_url: str | None = Field(default=None, max_length=500)
+    image_urls: list[str] | None = Field(default=None, max_length=10)
+    specifications: dict[str, str] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_nulls_and_empty_payload(cls, value):
+        if isinstance(value, dict) and (not value or any(item is None and key != "sale_price" for key, item in value.items())):
+            raise ValueError("Provide one or more valid product fields; only sale_price may be cleared")
+        return value
+
+
+class ProductStatusUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["active", "inactive"]
+
 
 class ProductOut(BaseModel):
     id: int

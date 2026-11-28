@@ -188,6 +188,22 @@ Phase completion means the listed local checks were executed successfully, not t
 | Operational/security hardening | Phases 1–7 | Docker, deployment docs, config, CI | Managed DB, TLS, secrets, backups, health/metrics, CSP, dependency scans, migration rollback and incident runbook. | CI, E2E, migration, SAST/dependency scan, load/security review. |
 | Accessibility/performance/release review | Working journeys | frontend, observability/docs | Keyboard/mobile/a11y pass, route code splitting, privacy/retention and legal review, staged release plan. | Playwright critical journeys, axe/a11y, bundle and performance budgets. |
 
+## Phase 12 — Existing product feature audit and completion (in progress; local validation passes; substantial scope and infrastructure blockers remain)
+
+Audit scope, per-module COMPLETE/PARTIAL/MISSING/BROKEN/PLACEHOLDER/DISCONNECTED/UNVERIFIED classifications, P0–P3 priorities, confirmed fixes and residual work: [`PHASE_12_FEATURE_AUDIT.md`](PHASE_12_FEATURE_AUDIT.md). Implementation decisions and executed verification: [`PHASE_12_IMPLEMENTATION_LOG.md`](PHASE_12_IMPLEMENTATION_LOG.md). This phase makes targeted additions to the current product; it is not a redesign or rewrite.
+
+| Milestone | Result | Evidence / remaining limitations |
+|---|---|---|
+| 12.1 Audit and baseline | Completed from API/routes/services, schema/migrations, frontend paths/pages, existing tests and prior phase audits. | Baseline: backend 74 passed; frontend 38 passed, lint/build passed. No external infrastructure or browser E2E claim. |
+| 12.2 Profile and application workflows | Added strict bounded schemas; creator-profile missing-record/ownership/uniqueness handling; idempotent repeated application-review state; explicit allowed transitions and row lock. | New regression cases cover malformed/extra/null/empty inputs, role/ownership denials, duplicates, missing records and duplicate-side-effect prevention. |
+| 12.3 Dashboard/navigation truthfulness | Removed dashboard/discovery sample fallback and nonfunctional controls; real notifications power recent activity; retry/empty/loading/error states and current date; removed dead-end Messages/invitation actions; creator discovery uses saved bios with creator-reported-metric disclosure and hides unproven scores; `/applications` role guard. | Public hero example is labeled illustrative and invented amounts/creator handle removed. Server authorization remains the security boundary. |
+| 12.4 Owner-scoped brand catalog | Added authenticated paginated `/brand/products`, explicit stock in create form, cached list refresh and owner/role/paging tests. | Product edit/archive and richer catalog management remain P2. |
+| 12.5 Role-aware profiles and brand catalog lifecycle | Added profile forms/API, brand product updates/stock/soft status and reasoned admin product moderation. | 4 new backend regression tests plus profile/product/admin UI integration tests; no migration. Product rows are never hard deleted. |
+| 12.6 Creator/application integration and disputes | Fixed platform search and creator review action permissions; added order-owner dispute intake, reporter status and notifications, preserving financial state. | Backend 81 passed; frontend 54 across 14 files; lint/build, compileall and `npm audit --omit=dev` passed (0 vulnerabilities). `pip-audit` absent. |
+| 12.7 Verification and remaining scope | Audit expanded to modules A–M with evidence/status/priority. | Starlette/httpx deprecation and Recharts jsdom warnings remain. PostgreSQL, Docker/Compose, backup/restore, actual SMTP delivery, browser E2E, deployment and production smoke checks were not run. |
+
+Current Phase 12 estimate: **80%** (scope estimate, not a test-derived KPI). Local fixes and automated regression checks are substantially complete; external runtime validation and the listed product gaps remain. Residual priorities: **P0** Phase 11 infrastructure checks; **P1** PostgreSQL concurrency and broader security/accessibility review; **P2** creator invitations, dispute evidence, messaging, saved addresses and product catalogue enhancements; **P3** support destination and specified dashboard date ranges. Payment remains simulated demo plus COD only.
+
 ## Current phase
 
 - **Audit and roadmap:** complete; the original branch baseline and prior Phase 1/2 evidence are recorded above and in `IMPLEMENTATION_STATUS.md`.
