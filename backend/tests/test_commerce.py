@@ -8,10 +8,12 @@ from sqlalchemy.pool import StaticPool
 from app.api.v1.auth import limiter
 from app.database import Base, get_db
 from app.main import app
-from app.models.entities import Application, BrandProfile, Campaign, CampaignProduct, Cart, CartItem, Click, Conversion, ConversionEvent, Order, OrderItem, PaymentAttempt, Product, Referral, ReferralActivity, ReferralRiskFlag, Reward, RewardRule, LedgerEntry, User, VisitorAttribution
+from app.models.entities import Application, BrandProfile, Campaign, CampaignProduct, Cart, CartItem, Click, Conversion, ConversionEvent, LedgerEntry, Notification, Order, OrderItem, PaymentAttempt, Product, Referral, ReferralActivity, ReferralRiskFlag, Reward, RewardEvent, RewardRule, User, VisitorAttribution
 from app.core.config import settings
 from app.security import create_access_token, hash_password
 from app.services.auth import create_session
+from app.services.conversions import create_conversion
+from app.services.rewards_engine import generate_order_rewards
 
 
 @pytest.fixture
@@ -614,6 +616,19 @@ def test_phase5_mixed_cart_creates_idempotent_item_attributed_rewards_for_multip
     with commerce_db() as db:
         assert db.scalar(select(func.count(Reward.id)))==2
         assert db.scalar(select(func.count(LedgerEntry.id)).where(LedgerEntry.entry_type=="REWARD_PENDING"))==2
+        order = db.scalar(select(Order).where(Order.customer_id == customer_id))
+        rewards_before = db.scalars(select(Reward).where(Reward.order_id == order.id)).all()
+        ids_before = {reward.id for reward in rewards_before}
+        repeated = generate_order_rewards(db, order, stage="collection", actor_id=_admin_id)
+        db.commit()
+        assert {reward.id for reward in repeated} == ids_before
+        assert db.scalar(select(func.count(Reward.id)).where(Reward.order_id == order.id)) == 2
+        assert db.scalar(select(func.count(RewardEvent.id)).join(Reward, Reward.id == RewardEvent.reward_id)
+                         .where(Reward.order_id == order.id, RewardEvent.event_type == "reward_created")) == 2
+        assert db.scalar(select(func.count(LedgerEntry.id)).where(LedgerEntry.order_id == order.id,
+                         LedgerEntry.entry_type == "REWARD_PENDING")) == 2
+        assert db.scalar(select(func.count(Notification.id)).where(Notification.event_key.in_(
+                         [f"reward-created:{reward_id}" for reward_id in ids_before]))) == 2
 
 
 def test_phase4_referral_link_click_mixed_cart_conversion_and_creator_analytics(commerce_db, commerce_client):
@@ -656,6 +671,11 @@ def test_phase4_referral_link_click_mixed_cart_conversion_and_creator_analytics(
         assert conversion and conversion.creator_id == creator_id and conversion.campaign_id == campaign_id
         assert conversion.attributed_amount == Decimal("100.00")
         assert len(items) == 2 and sum(item.referral_id is not None for item in items) == 1
+        replayed_conversion = create_conversion(db, stored, db.get(Referral, conversion.referral_id),
+            visitor_hash="retry-must-not-replace", attributed_amount=Decimal("999.00"), eligible_product_count=1,
+            customer=db.get(User, customer_id))
+        assert replayed_conversion.id == conversion.id
+        assert replayed_conversion.attributed_amount == Decimal("100.00")
         assert db.scalar(select(func.count(Conversion.id)).where(Conversion.order_id == stored.id)) == 1
         assert db.scalar(select(func.count(ConversionEvent.id)).where(ConversionEvent.conversion_id == conversion.id)) == 2
         click = db.scalar(select(Click).where(Click.referral_id == conversion.referral_id))

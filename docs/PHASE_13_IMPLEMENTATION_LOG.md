@@ -31,7 +31,8 @@
    - Added attribution-expiry/campaign-expiry coverage that verifies old conversions/rewards remain intact and expired attribution cannot create new ones.
    - Extended brand lifecycle coverage through reactivation; added creator suspension/reactivation coverage across sessions, referral use, new orders, notifications and retained historical conversion/reward rows.
    - Cancellation replay now asserts stock is not restored twice. Migration coverage removes the new columns from an 0009-shaped temporary SQLite DB, verifies 0010 adds them, then executes UPDATE/DELETE statements to prove SQLite triggers reject mutation.
-   - Added opt-in PostgreSQL tests for actual 0009→0010 upgrade/downgrade/re-upgrade and trigger enforcement, concurrent last-item checkout, concurrent cart creation + same-key attributed checkout, and concurrent overlapping disputes. These are **not executed** without an approved disposable PostgreSQL URL.
+   - Added opt-in PostgreSQL tests for actual 0009→0010 upgrade/downgrade/re-upgrade and trigger enforcement, transaction rollback, concurrent last-item checkout, concurrent cart creation + same-key attributed checkout, and concurrent overlapping disputes. These are **not executed** without an approved disposable PostgreSQL URL.
+   - Finalization directly replays conversion creation with altered values and reward generation after COD collection, asserting the original conversion/reward and unchanged event, ledger, and notification counts.
 
 ## Verification executed (continuation)
 
@@ -42,7 +43,10 @@
 - `cd frontend && npm run build` — passed, including `tsc -b` and production Vite build.
 - Migration tests ran on disposable temporary SQLite databases. The historical-path test removes the three 0010 columns before `upgrade head`, confirms column addition and proves SQLite triggers reject raw UPDATE/DELETE. The supported downgrade is deliberately non-destructive; columns/triggers persist and re-upgrade succeeds.
 - `cd backend && ./.venv/bin/alembic heads` — `0010_integration_snapshots (head)`.
-- Final `git diff --check`, secret-pattern scan and branch synchronization are pending until the continuation changes/docs are committed.
+- Finalization re-ran the backend suite: **84 passed, 4 skipped** in 25.18s; the skips are the four opt-in PostgreSQL cases. `compileall` passed and Alembic head remained `0010_integration_snapshots`.
+- Finalization also ran a fresh temporary SQLite online upgrade through `head`; `PRAGMA integrity_check` returned `ok` and the update/delete snapshot triggers were present. The temporary database was removed.
+- Frontend was re-run during finalization: **54 passed across 14 files**; lint and `npm run build` (including `tsc -b`) passed. Two existing Recharts jsdom zero-size warnings remain.
+- A non-required `alembic upgrade head --sql` probe failed at existing migration `0002_auth_security` because offline Alembic supplies a `MockConnection` that the migration calls `inspect()` on. Normal online fresh SQLite migration passed; offline SQL rendering is not claimed.
 - No PostgreSQL test ran. No Docker/Compose, browser E2E, live SMTP acceptance, multi-worker runtime, backup/restore, deployment or production smoke checks ran.
 
 ## Defects found while validating and fixed
