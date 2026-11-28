@@ -206,7 +206,7 @@ Current Phase 12 estimate: **80%** (scope estimate, not a test-derived KPI). Loc
 
 ## Phase 13 — Cross-module integration and transition reliability (in progress; final decision NO-GO)
 
-The detailed workflow matrix, 17 required regression scenarios, MVP gap dispositions, executed evidence and final decision are recorded in [`PHASE_13_FINAL_INTEGRATION_REPORT.md`](PHASE_13_FINAL_INTEGRATION_REPORT.md). Module findings remain in [`PHASE_13_INTEGRATION_AUDIT.md`](PHASE_13_INTEGRATION_AUDIT.md); changes and commands in [`PHASE_13_IMPLEMENTATION_LOG.md`](PHASE_13_IMPLEMENTATION_LOG.md). Preserve existing behavior; do not redesign or start Phase 14.
+The detailed workflow matrix, 17 required regression scenarios, MVP gap dispositions, executed evidence and final decision are recorded in [`PHASE_13_FINAL_INTEGRATION_REPORT.md`](PHASE_13_FINAL_INTEGRATION_REPORT.md). The follow-up PostgreSQL/Chromium environment investigation and exact blocked-test evidence are in [`PHASE_13_BLOCKER_RESOLUTION_REPORT.md`](PHASE_13_BLOCKER_RESOLUTION_REPORT.md). Module findings remain in [`PHASE_13_INTEGRATION_AUDIT.md`](PHASE_13_INTEGRATION_AUDIT.md); changes and commands in [`PHASE_13_IMPLEMENTATION_LOG.md`](PHASE_13_IMPLEMENTATION_LOG.md). Preserve existing behavior; do not redesign or start Phase 14.
 
 | Workstream | Local implementation/evidence | Outstanding |
 |---|---|---|

@@ -4,6 +4,8 @@
 **Decision:** **NO-GO — Phase 13 remains in progress; do not advance to Phase 14.**
 **Scope:** Final local integration audit and regression verification. This is not a production-readiness certificate. No UI redesign, real payment gateway, or actual payout was introduced.
 
+The subsequent PostgreSQL/Chromium environment investigation and latest full-suite rerun are documented in [`PHASE_13_BLOCKER_RESOLUTION_REPORT.md`](PHASE_13_BLOCKER_RESOLUTION_REPORT.md).
+
 ## Executive summary
 
 Local, disposable-SQLite backend integration tests and frontend component/unit checks pass. The final backend run was **84 passed, 4 skipped**; all four skips are PostgreSQL-only tests. Frontend tests were **54 passed across 14 files**; ESLint and the production build (including TypeScript `tsc -b`) passed. A fresh temporary SQLite database upgraded through `0010_integration_snapshots`, passed `PRAGMA integrity_check`, and contained the append-only order-item triggers.
