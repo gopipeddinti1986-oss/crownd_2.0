@@ -14,7 +14,7 @@ No locally reproducible P0/P1 code defect remains known from this audit. This is
 
 - Branch: `arena/e6c9b4f7-crownd-2-0` (preserved).
 - Starting/finalization-audit HEAD: `177255e05ab3231845e0336836ca07195395c451` (`Continue Phase 13 commerce integration verification`), synchronized with `origin/arena/e6c9b4f7-crownd-2-0` before finalization work.
-- Finalization adds only regression assertions and documentation; the final commit hash is recorded by the Git history after this report is committed and pushed.
+- Finalization commit: `5738577a2da2fd4b7b1ed3004ba9d7ff4a454a9d` (`Finalize Phase 13 integration verification`) contains the final matrix/report, project record updates, and direct conversion/reward replay regression assertions. This report also has a small Git-metadata follow-up; final branch HEAD is provided by the final Git verification.
 - Backend test DBs: disposable in-memory/temporary SQLite. A separate temporary file database was used for the fresh migration check and removed afterward.
 - Frontend tests run in Vitest/jsdom. They are not browser E2E.
 - No external provider, connected Supabase project, or production database was used.
